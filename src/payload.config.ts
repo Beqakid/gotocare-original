@@ -76,6 +76,9 @@ export default buildConfig({
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
 
+  // Disable GraphQL (not needed, and playground breaks CI builds)
+  graphQL: false,
+
   // D1 SQLite adapter
   db: sqliteD1Adapter({ binding: cloudflare.env.D1 }),
 
