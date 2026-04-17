@@ -25,6 +25,7 @@ const realpath = (value: string) => (fs.existsSync(value) ? fs.realpathSync(valu
 
 const isCLI = process.argv.some((value) => realpath(value)?.endsWith(path.join('payload', 'bin.js')))
 const isProduction = process.env.NODE_ENV === 'production'
+const isCI = !!process.env.CI
 
 // Cloudflare-compatible structured logger
 const createLog =
@@ -47,10 +48,16 @@ const cloudflareLogger = {
   silent: () => {},
 } as any
 
-const cloudflare =
-  isCLI || !isProduction
-    ? await getCloudflareContextFromWrangler()
-    : await getCloudflareContext({ async: true })
+// During CI builds, provide mock bindings (real bindings come at runtime on Workers)
+// This prevents Wrangler proxy session errors during Next.js static page data collection
+let cloudflare: any
+if (isCI) {
+  cloudflare = { env: { D1: {}, R2: {} } }
+} else if (isCLI || !isProduction) {
+  cloudflare = await getCloudflareContextFromWrangler()
+} else {
+  cloudflare = await getCloudflareContext({ async: true })
+}
 
 export default buildConfig({
   admin: {
