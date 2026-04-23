@@ -3,7 +3,7 @@ import { buildConfig } from 'payload'
 import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import sharp from 'sharp'
+// sharp removed - not available in Cloudflare Workers runtime
 
 import { Users } from './collections/Users'
 import { Media } from './collections/Media'
@@ -37,7 +37,6 @@ export default buildConfig({
       url: process.env.DATABASE_URL || 'file:./database.db',
     },
   }),
-  sharp,
   graphQL: false,
   cors: '*',
   endpoints: [
