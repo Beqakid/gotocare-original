@@ -49,7 +49,6 @@ const cloudflareLogger = {
 } as any
 
 // During CI builds, provide mock bindings (real bindings come at runtime on Workers)
-// This prevents Wrangler proxy session errors during Next.js static page data collection
 let cloudflare: any
 if (isCI) {
   cloudflare = { env: { D1: {}, R2: {} } }
@@ -92,12 +91,8 @@ export default buildConfig({
   // Structured logging in production
   logger: isProduction ? cloudflareLogger : undefined,
 
-  // CORS — add all frontend URLs
-  cors: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'https://gotocare-original.jjioji.workers.dev',
-  ],
+  // CORS — allow all origins for now (landing page may be served from various domains)
+  cors: '*',
 
   // R2 storage for media uploads
   plugins: [
