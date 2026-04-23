@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { getPayload } from 'payload'
 import config from '../../src/payload.config.js'
 
