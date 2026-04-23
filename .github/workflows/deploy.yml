@@ -36,8 +36,4 @@ jobs:
         run: pnpm exec wrangler deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: c1e395b56bdff4ca909cbf0d56a527b5   - name: Deploy to Cloudflare Workers
-        run: pnpm exec wrangler deploy
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: c1e395b56bdff4ca909cbf0d56a527b5
+          CLOUDFLARE_ACCOUNT_ID: c1e395b56bdff4ca909cbf0d56a527b5   
