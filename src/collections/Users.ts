@@ -25,12 +25,20 @@ export const Users: CollectionConfig = {
       options: [
         { label: 'Admin', value: 'admin' },
         { label: 'Agency Owner', value: 'agency_owner' },
+        { label: 'Scheduler', value: 'scheduler' },
         { label: 'Caregiver', value: 'caregiver' },
         { label: 'Client', value: 'client' },
       ],
       access: {
-        update: ({ req: { user } }) => Boolean(user?.role === 'admin'),
+        update: ({ req: { user } }) => Boolean(user?.role === 'admin' || user?.role === 'agency_owner'),
       },
+    },
+    {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      saveToJWT: true,
+      admin: { description: 'Agency this user belongs to' },
     },
   ],
   access: {
@@ -38,6 +46,10 @@ export const Users: CollectionConfig = {
     read: ({ req: { user } }) => {
       if (!user) return false
       if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return { id: { equals: user.id } }
     },
     update: ({ req: { user } }) => {

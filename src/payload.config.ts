@@ -14,6 +14,7 @@ import { Shifts } from './collections/Shifts'
 import { Timesheets } from './collections/Timesheets'
 import { Invoices } from './collections/Invoices'
 import { Leads } from './collections/Leads'
+import { Agencies } from './collections/Agencies'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -25,7 +26,7 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [Users, Media, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
+  collections: [Users, Media, Agencies, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
   secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
@@ -56,6 +57,7 @@ export default buildConfig({
               message: data.message || '',
               source: data.source || 'landing_page',
               status: 'new',
+              agency: data.agencyId || null,
             },
           })
           return Response.json({ success: true, id: lead.id })
@@ -94,11 +96,11 @@ export default buildConfig({
       method: 'post',
       handler: async (req) => {
         try {
-          const data = await req.json()
           const user = req.user
           if (!user) {
             return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
           }
+          const data = await req.json()
           const leadId = data.leadId
           if (!leadId) {
             return Response.json({ success: false, error: 'leadId is required' }, { status: 400 })
@@ -107,6 +109,7 @@ export default buildConfig({
           if (!lead) {
             return Response.json({ success: false, error: 'Lead not found' }, { status: 404 })
           }
+          const agencyId = lead.agency || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
           const client = await req.payload.create({
             collection: 'clients',
             data: {
@@ -116,6 +119,7 @@ export default buildConfig({
               phone: lead.phone || '',
               status: 'active',
               leadSource: 'website',
+              agency: agencyId,
             },
           })
           await req.payload.update({
@@ -147,6 +151,7 @@ export default buildConfig({
           const shifts = await req.payload.find({ collection: 'shifts', limit: 0 })
           const timesheets = await req.payload.find({ collection: 'timesheets', limit: 0 })
           const invoices = await req.payload.find({ collection: 'invoices', limit: 0 })
+          const agencies = await req.payload.find({ collection: 'agencies', limit: 0 })
           return Response.json({
             success: true,
             stats: {
@@ -156,6 +161,7 @@ export default buildConfig({
               shifts: shifts.totalDocs,
               timesheets: timesheets.totalDocs,
               invoices: invoices.totalDocs,
+              agencies: agencies.totalDocs,
             },
           })
         } catch (error) {
@@ -187,6 +193,7 @@ export default buildConfig({
               shift: shift.id,
               caregiver: shift.caregiver,
               client: shift.client,
+              agency: shift.agency || null,
               date: now,
               clockIn: now,
               status: 'clocked_in',
@@ -291,11 +298,13 @@ export default buildConfig({
           const tax = data.taxRate ? Math.round(totalAmount * data.taxRate * 100) / 100 : 0
           const grandTotal = Math.round((totalAmount + tax) * 100) / 100
           const invoiceNumber = 'INV-' + Date.now().toString(36).toUpperCase()
+          const agencyId = data.agencyId || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
           const invoice = await req.payload.create({
             collection: 'invoices',
             data: {
               client: data.clientId,
               caregiver: data.caregiverId || null,
+              agency: agencyId,
               invoiceNumber: invoiceNumber,
               periodStart: periodStart,
               periodEnd: periodEnd,
@@ -322,6 +331,148 @@ export default buildConfig({
           })
         } catch (error) {
           return Response.json({ success: false, error: 'Failed to generate invoice' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/recurring-shifts',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.clientId || !data.caregiverId || !data.startDate || !data.startTime || !data.endTime) {
+            return Response.json({ success: false, error: 'clientId, caregiverId, startDate, startTime, endTime are required' }, { status: 400 })
+          }
+          const weeks = data.weeks || 4
+          const daysOfWeek = data.daysOfWeek || [1]
+          const groupId = 'REC-' + Date.now().toString(36).toUpperCase()
+          const agencyId = data.agencyId || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
+          const created = []
+          const startDate = new Date(data.startDate)
+          for (let w = 0; w < weeks; w++) {
+            for (const dayOfWeek of daysOfWeek) {
+              const shiftDate = new Date(startDate)
+              shiftDate.setDate(startDate.getDate() + (w * 7) + ((dayOfWeek - startDate.getDay() + 7) % 7))
+              if (shiftDate < startDate && w === 0) {
+                shiftDate.setDate(shiftDate.getDate() + 7)
+              }
+              const shift = await req.payload.create({
+                collection: 'shifts',
+                data: {
+                  client: data.clientId,
+                  caregiver: data.caregiverId,
+                  agency: agencyId,
+                  date: shiftDate.toISOString(),
+                  startTime: data.startTime,
+                  endTime: data.endTime,
+                  status: 'scheduled',
+                  priority: data.priority || 'normal',
+                  recurringGroupId: groupId,
+                  notes: data.notes || 'Recurring shift',
+                },
+              })
+              created.push({ id: shift.id, date: shiftDate.toISOString().split('T')[0] })
+            }
+          }
+          return Response.json({
+            success: true,
+            recurringGroupId: groupId,
+            shiftsCreated: created.length,
+            shifts: created,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to create recurring shifts' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/my-shifts',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const url = new URL(req.url)
+          const caregiverId = url.searchParams.get('caregiverId')
+          if (!caregiverId) {
+            return Response.json({ success: false, error: 'caregiverId is required' }, { status: 400 })
+          }
+          const shifts = await req.payload.find({
+            collection: 'shifts',
+            where: {
+              caregiver: { equals: caregiverId },
+              status: { in: ['scheduled', 'in_progress'] },
+            },
+            sort: 'date',
+            limit: 50,
+            depth: 1,
+          })
+          const timesheets = await req.payload.find({
+            collection: 'timesheets',
+            where: {
+              caregiver: { equals: caregiverId },
+              status: { equals: 'clocked_in' },
+            },
+            limit: 10,
+          })
+          return Response.json({
+            success: true,
+            shifts: shifts.docs,
+            activeTimesheets: timesheets.docs,
+            totalUpcoming: shifts.totalDocs,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to fetch shifts' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/register-agency',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          if (!data.agencyName || !data.email || !data.password) {
+            return Response.json({ success: false, error: 'agencyName, email, password are required' }, { status: 400 })
+          }
+          const slug = data.agencyName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+          const agency = await req.payload.create({
+            collection: 'agencies',
+            data: {
+              name: data.agencyName,
+              slug: slug,
+              ownerEmail: data.email,
+              phone: data.phone || '',
+              status: 'trial',
+              plan: 'starter',
+              trialEndsAt: new Date(Date.now() + 14 * 86400000).toISOString(),
+              maxCaregivers: 10,
+            },
+          })
+          const user = await req.payload.create({
+            collection: 'users',
+            data: {
+              email: data.email,
+              password: data.password,
+              name: data.ownerName || '',
+              role: 'agency_owner',
+              agency: agency.id,
+            },
+          })
+          return Response.json({
+            success: true,
+            agencyId: agency.id,
+            userId: user.id,
+            trialEndsAt: agency.trialEndsAt,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to register agency' }, { status: 500 })
         }
       },
     },
