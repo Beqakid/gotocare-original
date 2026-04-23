@@ -91,7 +91,7 @@ export default buildConfig({
   // Structured logging in production
   logger: isProduction ? cloudflareLogger : undefined,
 
-  // CORS — allow all origins for now (landing page may be served from various domains)
+  // CORS — allow all origins
   cors: '*',
 
   // R2 storage for media uploads
@@ -180,6 +180,136 @@ export default buildConfig({
         } catch (error) {
           return Response.json(
             { error: 'Failed to submit demo request. Please try again.' },
+            { status: 500 },
+          )
+        }
+      },
+    },
+    // Convert Lead to Client (authenticated)
+    {
+      path: '/convert-lead',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          if (!req.user) {
+            return Response.json({ error: 'Authentication required.' }, { status: 401 })
+          }
+
+          const body = await req.json()
+          const { leadId } = body
+
+          if (!leadId) {
+            return Response.json({ error: 'leadId is required.' }, { status: 400 })
+          }
+
+          // Fetch the lead
+          const lead = await req.payload.findByID({
+            collection: 'leads',
+            id: leadId,
+            overrideAccess: true,
+          })
+
+          if (!lead) {
+            return Response.json({ error: 'Lead not found.' }, { status: 404 })
+          }
+
+          if (lead.status === 'converted') {
+            return Response.json(
+              { error: 'Lead already converted.', clientId: lead.convertedClientId },
+              { status: 400 },
+            )
+          }
+
+          // Create client from lead data
+          const client = await req.payload.create({
+            collection: 'clients',
+            data: {
+              firstName: lead.firstName,
+              lastName: lead.lastName,
+              email: lead.email || '',
+              phone: lead.phone || '',
+              careNeeds: lead.careType ? `Care type: ${lead.careType}. ${lead.message || ''}` : lead.message || '',
+              leadSource: lead.source || 'website',
+              status: 'pending',
+              notes: `Converted from lead #${lead.id} on ${new Date().toISOString().split('T')[0]}`,
+            },
+            overrideAccess: true,
+          })
+
+          // Update lead status to converted
+          await req.payload.update({
+            collection: 'leads',
+            id: leadId,
+            data: {
+              status: 'converted',
+              convertedClientId: client.id,
+            },
+            overrideAccess: true,
+          })
+
+          return Response.json({
+            success: true,
+            message: 'Lead converted to client successfully.',
+            clientId: client.id,
+            leadId: lead.id,
+          })
+        } catch (error) {
+          return Response.json(
+            { error: 'Failed to convert lead. Please try again.' },
+            { status: 500 },
+          )
+        }
+      },
+    },
+    // Dashboard stats endpoint (authenticated)
+    {
+      path: '/dashboard-stats',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          if (!req.user) {
+            return Response.json({ error: 'Authentication required.' }, { status: 401 })
+          }
+
+          const leads = await req.payload.find({ collection: 'leads', limit: 0, overrideAccess: true })
+          const clients = await req.payload.find({ collection: 'clients', limit: 0, overrideAccess: true })
+          const caregivers = await req.payload.find({ collection: 'caregivers', limit: 0, overrideAccess: true })
+          const shifts = await req.payload.find({ collection: 'shifts', limit: 0, overrideAccess: true })
+
+          // Count leads by status
+          const allLeads = await req.payload.find({ collection: 'leads', limit: 100, overrideAccess: true })
+          const leadsByStatus = { new: 0, contacted: 0, qualified: 0, converted: 0, lost: 0 }
+          for (const l of allLeads.docs) {
+            if (leadsByStatus[l.status] !== undefined) leadsByStatus[l.status]++
+          }
+
+          // Count clients by status
+          const allClients = await req.payload.find({ collection: 'clients', limit: 100, overrideAccess: true })
+          const clientsByStatus = { active: 0, inactive: 0, pending: 0 }
+          for (const c of allClients.docs) {
+            if (clientsByStatus[c.status] !== undefined) clientsByStatus[c.status]++
+          }
+
+          // Count shifts by status
+          const allShifts = await req.payload.find({ collection: 'shifts', limit: 100, overrideAccess: true })
+          const shiftsByStatus = { scheduled: 0, in_progress: 0, completed: 0, cancelled: 0 }
+          for (const s of allShifts.docs) {
+            if (shiftsByStatus[s.status] !== undefined) shiftsByStatus[s.status]++
+          }
+
+          return Response.json({
+            totalLeads: leads.totalDocs,
+            totalClients: clients.totalDocs,
+            totalCaregivers: caregivers.totalDocs,
+            totalShifts: shifts.totalDocs,
+            leadsByStatus,
+            clientsByStatus,
+            shiftsByStatus,
+            recentLeads: allLeads.docs.slice(0, 5),
+          })
+        } catch (error) {
+          return Response.json(
+            { error: 'Failed to fetch dashboard stats.' },
             { status: 500 },
           )
         }

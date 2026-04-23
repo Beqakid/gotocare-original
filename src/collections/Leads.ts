@@ -66,6 +66,21 @@ export const Leads: CollectionConfig = {
       ],
     },
     {
+      name: 'assignedTo',
+      type: 'text',
+      admin: { description: 'Staff member handling this lead' },
+    },
+    {
+      name: 'followUpDate',
+      type: 'date',
+      admin: { description: 'Next follow-up date' },
+    },
+    {
+      name: 'convertedClientId',
+      type: 'number',
+      admin: { description: 'Client ID if converted (auto-set)' },
+    },
+    {
       name: 'notes',
       type: 'textarea',
     },

@@ -62,6 +62,24 @@ export const Clients: CollectionConfig = {
       type: 'textarea',
     },
     {
+      name: 'preferredSchedule',
+      type: 'textarea',
+      admin: { description: 'Preferred days/times for care visits' },
+    },
+    {
+      name: 'insuranceProvider',
+      type: 'text',
+    },
+    {
+      name: 'insurancePolicyNumber',
+      type: 'text',
+    },
+    {
+      name: 'leadSource',
+      type: 'text',
+      admin: { description: 'How this client was acquired (auto-set from lead)' },
+    },
+    {
       name: 'status',
       type: 'select',
       required: true,
@@ -80,7 +98,6 @@ export const Clients: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
-      if (user.role === 'admin') return true
       return true
     },
     create: ({ req: { user } }) => !!user,

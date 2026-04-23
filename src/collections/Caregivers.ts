@@ -51,6 +51,21 @@ export const Caregivers: CollectionConfig = {
       type: 'number',
     },
     {
+      name: 'experienceYears',
+      type: 'number',
+      admin: { description: 'Years of caregiving experience' },
+    },
+    {
+      name: 'languages',
+      type: 'text',
+      admin: { description: 'Languages spoken (comma-separated)' },
+    },
+    {
+      name: 'availability',
+      type: 'textarea',
+      admin: { description: 'Available days/times' },
+    },
+    {
       name: 'status',
       type: 'select',
       required: true,
