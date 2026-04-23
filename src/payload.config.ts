@@ -2,8 +2,10 @@
 import { buildConfig } from 'payload'
 import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
 import path from 'path'
+import fs from 'fs'
 import { fileURLToPath } from 'url'
-// sharp removed - not available in Cloudflare Workers runtime
+import { getCloudflareContext } from '@opennextjs/cloudflare'
+import { r2Storage } from '@payloadcms/storage-r2'
 
 import { Users } from './collections/Users'
 import { Media } from './collections/Media'
@@ -19,6 +21,25 @@ import { Locations } from './collections/Locations'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
+const realpath = (value) => (fs.existsSync(value) ? fs.realpathSync(value) : undefined)
+
+const isCLI = process.argv.some((value) => realpath(value)?.endsWith(path.join('payload', 'bin.js')))
+const isProduction = process.env.NODE_ENV === 'production'
+
+function getCloudflareContextFromWrangler() {
+  return import(`${'__wrangler'.replaceAll('_', '')}`).then(
+    ({ getPlatformProxy }) =>
+      getPlatformProxy({
+        environment: process.env.CLOUDFLARE_ENV,
+        remoteBindings: isProduction,
+      }),
+  )
+}
+
+const cloudflare =
+  isCLI || !isProduction
+    ? await getCloudflareContextFromWrangler()
+    : await getCloudflareContext({ async: true })
 
 export default buildConfig({
   admin: {
@@ -32,14 +53,16 @@ export default buildConfig({
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
-  db: sqliteD1Adapter({
-    client: {
-      url: process.env.DATABASE_URL || 'file:./database.db',
-    },
-  }),
+  db: sqliteD1Adapter({ binding: cloudflare.env.D1 }),
   graphQL: false,
   cors: '*',
-  endpoints: [
+  plugins: [
+    r2Storage({
+      bucket: cloudflare.env.R2,
+      collections: { media: true },
+    }),
+  ],
+    endpoints: [
     {
       path: '/submit-lead',
       method: 'post',
