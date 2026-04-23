@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { buildConfig } from 'payload'
-import { sqliteAdapter } from '@payloadcms/db-sqlite'
+import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import sharp from 'sharp'
@@ -32,7 +32,7 @@ export default buildConfig({
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
-  db: sqliteAdapter({
+  db: sqliteD1Adapter({
     client: {
       url: process.env.DATABASE_URL || 'file:./database.db',
     },
