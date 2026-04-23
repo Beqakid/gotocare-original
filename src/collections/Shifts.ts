@@ -8,10 +8,10 @@ export const Shifts: CollectionConfig = {
   },
   fields: [
     {
-      name: 'caregiver',
+      name: 'agency',
       type: 'relationship',
-      relationTo: 'caregivers',
-      required: true,
+      relationTo: 'agencies',
+      admin: { description: 'Agency this shift belongs to' },
     },
     {
       name: 'client',
@@ -20,9 +20,10 @@ export const Shifts: CollectionConfig = {
       required: true,
     },
     {
-      name: 'service',
+      name: 'caregiver',
       type: 'relationship',
-      relationTo: 'services',
+      relationTo: 'caregivers',
+      required: true,
     },
     {
       name: 'date',
@@ -33,19 +34,18 @@ export const Shifts: CollectionConfig = {
       name: 'startTime',
       type: 'text',
       required: true,
+      admin: { description: 'Format: HH:MM (24hr)' },
     },
     {
       name: 'endTime',
       type: 'text',
       required: true,
+      admin: { description: 'Format: HH:MM (24hr)' },
     },
     {
       name: 'totalHours',
       type: 'number',
-      admin: {
-        readOnly: true,
-        description: 'Auto-calculated from start/end time',
-      },
+      admin: { description: 'Auto-calculated or manually set' },
     },
     {
       name: 'status',
@@ -61,13 +61,6 @@ export const Shifts: CollectionConfig = {
       ],
     },
     {
-      name: 'recurringGroupId',
-      type: 'text',
-      admin: {
-        description: 'Groups recurring shifts together',
-      },
-    },
-    {
       name: 'priority',
       type: 'select',
       defaultValue: 'normal',
@@ -79,6 +72,11 @@ export const Shifts: CollectionConfig = {
       ],
     },
     {
+      name: 'recurringGroupId',
+      type: 'text',
+      admin: { description: 'Links recurring shifts together' },
+    },
+    {
       name: 'notes',
       type: 'textarea',
     },
@@ -86,10 +84,15 @@ export const Shifts: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     create: ({ req: { user } }) => !!user,
     update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }

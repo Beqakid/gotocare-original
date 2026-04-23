@@ -8,6 +8,12 @@ export const Invoices: CollectionConfig = {
   },
   fields: [
     {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      admin: { description: 'Agency this invoice belongs to' },
+    },
+    {
       name: 'client',
       type: 'relationship',
       relationTo: 'clients',
@@ -17,6 +23,7 @@ export const Invoices: CollectionConfig = {
       name: 'caregiver',
       type: 'relationship',
       relationTo: 'caregivers',
+      admin: { description: 'Primary caregiver for this invoice period' },
     },
     {
       name: 'invoiceNumber',
@@ -27,10 +34,12 @@ export const Invoices: CollectionConfig = {
     {
       name: 'periodStart',
       type: 'date',
+      admin: { description: 'Billing period start date' },
     },
     {
       name: 'periodEnd',
       type: 'date',
+      admin: { description: 'Billing period end date' },
     },
     {
       name: 'totalHours',
@@ -53,9 +62,7 @@ export const Invoices: CollectionConfig = {
     {
       name: 'totalAmount',
       type: 'number',
-      admin: {
-        description: 'amount + tax',
-      },
+      admin: { description: 'Amount + tax' },
     },
     {
       name: 'status',
@@ -86,9 +93,9 @@ export const Invoices: CollectionConfig = {
       name: 'paymentMethod',
       type: 'select',
       options: [
+        { label: 'Credit Card', value: 'credit_card' },
         { label: 'Bank Transfer', value: 'bank_transfer' },
         { label: 'Check', value: 'check' },
-        { label: 'Credit Card', value: 'credit_card' },
         { label: 'Cash', value: 'cash' },
         { label: 'Insurance', value: 'insurance' },
       ],
@@ -101,10 +108,15 @@ export const Invoices: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     create: ({ req: { user } }) => !!user,
     update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }

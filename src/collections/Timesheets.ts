@@ -4,9 +4,15 @@ import type { CollectionConfig } from 'payload'
 export const Timesheets: CollectionConfig = {
   slug: 'timesheets',
   admin: {
-    useAsTitle: 'status',
+    useAsTitle: 'date',
   },
   fields: [
+    {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      admin: { description: 'Agency this timesheet belongs to' },
+    },
     {
       name: 'shift',
       type: 'relationship',
@@ -22,6 +28,7 @@ export const Timesheets: CollectionConfig = {
       name: 'client',
       type: 'relationship',
       relationTo: 'clients',
+      admin: { description: 'Client for this timesheet entry' },
     },
     {
       name: 'date',
@@ -32,58 +39,41 @@ export const Timesheets: CollectionConfig = {
       name: 'clockIn',
       type: 'date',
       required: true,
-      admin: {
-        date: {
-          pickerAppearance: 'dayAndTime',
-        },
-      },
+      admin: { description: 'Clock in timestamp' },
     },
     {
       name: 'clockOut',
       type: 'date',
-      admin: {
-        date: {
-          pickerAppearance: 'dayAndTime',
-        },
-      },
+      admin: { description: 'Clock out timestamp' },
     },
     {
       name: 'hoursWorked',
       type: 'number',
-      admin: {
-        description: 'Auto-calculated on clock-out',
-      },
     },
     {
       name: 'hourlyRate',
       type: 'number',
-      admin: {
-        description: 'Rate at time of shift',
-      },
     },
     {
       name: 'totalPay',
       type: 'number',
-      admin: {
-        description: 'hoursWorked * hourlyRate',
-      },
     },
     {
       name: 'status',
       type: 'select',
       required: true,
-      defaultValue: 'pending',
+      defaultValue: 'clocked_in',
       options: [
         { label: 'Clocked In', value: 'clocked_in' },
-        { label: 'Pending Review', value: 'pending' },
+        { label: 'Pending', value: 'pending' },
         { label: 'Approved', value: 'approved' },
         { label: 'Rejected', value: 'rejected' },
       ],
     },
     {
       name: 'approvedBy',
-      type: 'relationship',
-      relationTo: 'users',
+      type: 'text',
+      admin: { description: 'Name/ID of person who approved' },
     },
     {
       name: 'notes',
@@ -93,10 +83,15 @@ export const Timesheets: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     create: ({ req: { user } }) => !!user,
     update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }
