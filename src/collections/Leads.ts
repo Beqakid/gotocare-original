@@ -8,6 +8,12 @@ export const Leads: CollectionConfig = {
   },
   fields: [
     {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      admin: { description: 'Agency this lead belongs to' },
+    },
+    {
       name: 'firstName',
       type: 'text',
       required: true,
@@ -49,6 +55,7 @@ export const Leads: CollectionConfig = {
         { label: 'Website', value: 'website' },
         { label: 'Referral', value: 'referral' },
         { label: 'Phone', value: 'phone' },
+        { label: 'Landing Page', value: 'landing_page' },
         { label: 'Other', value: 'other' },
       ],
     },
@@ -89,9 +96,14 @@ export const Leads: CollectionConfig = {
     create: () => true,
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }

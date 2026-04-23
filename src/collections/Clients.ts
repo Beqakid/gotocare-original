@@ -8,6 +8,12 @@ export const Clients: CollectionConfig = {
   },
   fields: [
     {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      admin: { description: 'Agency this client belongs to' },
+    },
+    {
       name: 'firstName',
       type: 'text',
       required: true,
@@ -98,10 +104,23 @@ export const Clients: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     create: ({ req: { user } }) => !!user,
-    update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    update: ({ req: { user } }) => {
+      if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
+      return true
+    },
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }

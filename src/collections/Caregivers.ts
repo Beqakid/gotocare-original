@@ -8,6 +8,18 @@ export const Caregivers: CollectionConfig = {
   },
   fields: [
     {
+      name: 'agency',
+      type: 'relationship',
+      relationTo: 'agencies',
+      admin: { description: 'Agency this caregiver belongs to' },
+    },
+    {
+      name: 'linkedUser',
+      type: 'relationship',
+      relationTo: 'users',
+      admin: { description: 'User account for caregiver portal access' },
+    },
+    {
       name: 'firstName',
       type: 'text',
       required: true,
@@ -92,10 +104,23 @@ export const Caregivers: CollectionConfig = {
   access: {
     read: ({ req: { user } }) => {
       if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
       return true
     },
     create: ({ req: { user } }) => !!user,
-    update: ({ req: { user } }) => !!user,
-    delete: ({ req: { user } }) => user?.role === 'admin',
+    update: ({ req: { user } }) => {
+      if (!user) return false
+      if (user.role === 'admin') return true
+      if (user.agency) {
+        const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+        return { agency: { equals: agencyId } }
+      }
+      return true
+    },
+    delete: ({ req: { user } }) => user?.role === 'admin' || user?.role === 'agency_owner',
   },
 }
