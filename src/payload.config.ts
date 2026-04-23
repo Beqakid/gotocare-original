@@ -15,6 +15,7 @@ import { Timesheets } from './collections/Timesheets'
 import { Invoices } from './collections/Invoices'
 import { Leads } from './collections/Leads'
 import { Agencies } from './collections/Agencies'
+import { Locations } from './collections/Locations'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -26,7 +27,7 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [Users, Media, Agencies, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
+  collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
   secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
@@ -46,19 +47,21 @@ export default buildConfig({
       handler: async (req) => {
         try {
           const data = await req.json()
+          const leadData = {
+            firstName: data.firstName || '',
+            lastName: data.lastName || '',
+            email: data.email || '',
+            phone: data.phone || '',
+            careType: data.careType || 'home_care',
+            message: data.message || '',
+            source: data.source || 'landing_page',
+            status: 'new',
+            agency: data.agencyId || null,
+            location: data.locationId || null,
+          }
           const lead = await req.payload.create({
             collection: 'leads',
-            data: {
-              firstName: data.firstName || '',
-              lastName: data.lastName || '',
-              email: data.email || '',
-              phone: data.phone || '',
-              careType: data.careType || 'home_care',
-              message: data.message || '',
-              source: data.source || 'landing_page',
-              status: 'new',
-              agency: data.agencyId || null,
-            },
+            data: leadData,
           })
           return Response.json({ success: true, id: lead.id })
         } catch (error) {
@@ -110,6 +113,7 @@ export default buildConfig({
             return Response.json({ success: false, error: 'Lead not found' }, { status: 404 })
           }
           const agencyId = lead.agency || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
+          const locationId = lead.location || null
           const client = await req.payload.create({
             collection: 'clients',
             data: {
@@ -120,6 +124,7 @@ export default buildConfig({
               status: 'active',
               leadSource: 'website',
               agency: agencyId,
+              location: locationId,
             },
           })
           await req.payload.update({
@@ -145,13 +150,40 @@ export default buildConfig({
           if (!user) {
             return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
           }
-          const leads = await req.payload.find({ collection: 'leads', limit: 0 })
-          const clients = await req.payload.find({ collection: 'clients', limit: 0 })
-          const caregivers = await req.payload.find({ collection: 'caregivers', limit: 0 })
-          const shifts = await req.payload.find({ collection: 'shifts', limit: 0 })
-          const timesheets = await req.payload.find({ collection: 'timesheets', limit: 0 })
-          const invoices = await req.payload.find({ collection: 'invoices', limit: 0 })
-          const agencies = await req.payload.find({ collection: 'agencies', limit: 0 })
+          const agencyFilter = {}
+          if (user.role !== 'admin' && user.agency) {
+            const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+            agencyFilter.agency = { equals: agencyId }
+          }
+          const url = new URL(req.url)
+          const locationId = url.searchParams.get('locationId')
+          if (locationId) {
+            agencyFilter.location = { equals: locationId }
+          }
+          const leads = await req.payload.find({ collection: 'leads', where: agencyFilter, limit: 0 })
+          const clients = await req.payload.find({ collection: 'clients', where: agencyFilter, limit: 0 })
+          const caregivers = await req.payload.find({ collection: 'caregivers', where: agencyFilter, limit: 0 })
+          const shifts = await req.payload.find({ collection: 'shifts', where: agencyFilter, limit: 0 })
+          const timesheets = await req.payload.find({ collection: 'timesheets', where: agencyFilter, limit: 0 })
+          const invoices = await req.payload.find({ collection: 'invoices', where: agencyFilter, limit: 0 })
+          let agencyCount = 0
+          if (user.role === 'admin') {
+            const agencies = await req.payload.find({ collection: 'agencies', limit: 0 })
+            agencyCount = agencies.totalDocs
+          }
+          let locations = []
+          if (user.agency) {
+            const agencyId = typeof user.agency === 'object' ? user.agency.id : user.agency
+            const locs = await req.payload.find({
+              collection: 'locations',
+              where: { agency: { equals: agencyId } },
+              limit: 100,
+            })
+            locations = locs.docs.map((l) => ({ id: l.id, name: l.name, city: l.addressCity, state: l.addressState }))
+          } else if (user.role === 'admin') {
+            const locs = await req.payload.find({ collection: 'locations', limit: 100 })
+            locations = locs.docs.map((l) => ({ id: l.id, name: l.name, city: l.addressCity, state: l.addressState, agency: l.agency }))
+          }
           return Response.json({
             success: true,
             stats: {
@@ -161,8 +193,9 @@ export default buildConfig({
               shifts: shifts.totalDocs,
               timesheets: timesheets.totalDocs,
               invoices: invoices.totalDocs,
-              agencies: agencies.totalDocs,
+              agencies: agencyCount,
             },
+            locations: locations,
           })
         } catch (error) {
           return Response.json({ success: false, error: 'Failed to get stats' }, { status: 500 })
@@ -366,6 +399,7 @@ export default buildConfig({
                   client: data.clientId,
                   caregiver: data.caregiverId,
                   agency: agencyId,
+                  location: data.locationId || null,
                   date: shiftDate.toISOString(),
                   startTime: data.startTime,
                   endTime: data.endTime,
@@ -449,10 +483,29 @@ export default buildConfig({
               slug: slug,
               ownerEmail: data.email,
               phone: data.phone || '',
+              addressCity: data.city || '',
+              addressState: data.state || '',
               status: 'trial',
               plan: 'starter',
               trialEndsAt: new Date(Date.now() + 14 * 86400000).toISOString(),
               maxCaregivers: 10,
+            },
+          })
+          // Create default HQ location
+          const locationSlug = slug + '-hq'
+          const location = await req.payload.create({
+            collection: 'locations',
+            data: {
+              agency: agency.id,
+              name: data.locationName || 'Main Office',
+              slug: locationSlug,
+              addressCity: data.city || '',
+              addressState: data.state || '',
+              addressStreet: data.address || '',
+              addressZip: data.zip || '',
+              phone: data.phone || '',
+              email: data.email,
+              status: 'active',
             },
           })
           const user = await req.payload.create({
@@ -468,11 +521,63 @@ export default buildConfig({
           return Response.json({
             success: true,
             agencyId: agency.id,
+            agencySlug: slug,
+            locationId: location.id,
             userId: user.id,
             trialEndsAt: agency.trialEndsAt,
           })
         } catch (error) {
           return Response.json({ success: false, error: 'Failed to register agency' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/agency-locations',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const agencySlug = url.searchParams.get('agencySlug')
+          const agencyId = url.searchParams.get('agencyId')
+          if (!agencySlug && !agencyId) {
+            return Response.json({ success: false, error: 'agencySlug or agencyId is required' }, { status: 400 })
+          }
+          let agency = null
+          if (agencySlug) {
+            const agencies = await req.payload.find({
+              collection: 'agencies',
+              where: { slug: { equals: agencySlug } },
+              limit: 1,
+            })
+            if (agencies.docs.length === 0) {
+              return Response.json({ success: false, error: 'Agency not found' }, { status: 404 })
+            }
+            agency = agencies.docs[0]
+          } else {
+            agency = await req.payload.findByID({ collection: 'agencies', id: agencyId })
+          }
+          const locations = await req.payload.find({
+            collection: 'locations',
+            where: {
+              agency: { equals: agency.id },
+              status: { equals: 'active' },
+            },
+            limit: 100,
+          })
+          return Response.json({
+            success: true,
+            agency: { id: agency.id, name: agency.name, slug: agency.slug },
+            locations: locations.docs.map((l) => ({
+              id: l.id,
+              name: l.name,
+              slug: l.slug,
+              city: l.addressCity,
+              state: l.addressState,
+              phone: l.phone,
+            })),
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to fetch locations' }, { status: 500 })
         }
       },
     },

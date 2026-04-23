@@ -14,6 +14,12 @@ export const Leads: CollectionConfig = {
       admin: { description: 'Agency this lead belongs to' },
     },
     {
+      name: 'location',
+      type: 'relationship',
+      relationTo: 'locations',
+      admin: { description: 'Specific agency location/branch for this lead' },
+    },
+    {
       name: 'firstName',
       type: 'text',
       required: true,
@@ -56,6 +62,7 @@ export const Leads: CollectionConfig = {
         { label: 'Referral', value: 'referral' },
         { label: 'Phone', value: 'phone' },
         { label: 'Landing Page', value: 'landing_page' },
+        { label: 'Demo Request', value: 'demo_request' },
         { label: 'Other', value: 'other' },
       ],
     },
@@ -86,6 +93,11 @@ export const Leads: CollectionConfig = {
       name: 'convertedClientId',
       type: 'number',
       admin: { description: 'Client ID if converted (auto-set)' },
+    },
+    {
+      name: 'company',
+      type: 'text',
+      admin: { description: 'Agency/company name for demo requests' },
     },
     {
       name: 'notes',
