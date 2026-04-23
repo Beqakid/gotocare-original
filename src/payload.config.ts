@@ -1,13 +1,9 @@
 // @ts-nocheck
-import fs from 'fs'
-import path from 'path'
-import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
-import { lexicalEditor } from '@payloadcms/richtext-lexical'
 import { buildConfig } from 'payload'
+import { sqliteAdapter } from '@payloadcms/db-sqlite'
+import path from 'path'
 import { fileURLToPath } from 'url'
-import { CloudflareContext, getCloudflareContext } from '@opennextjs/cloudflare'
-import { GetPlatformProxyOptions } from 'wrangler'
-import { r2Storage } from '@payloadcms/storage-r2'
+import sharp from 'sharp'
 
 import { Users } from './collections/Users'
 import { Media } from './collections/Media'
@@ -21,42 +17,6 @@ import { Leads } from './collections/Leads'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
-const realpath = (value: string) => (fs.existsSync(value) ? fs.realpathSync(value) : undefined)
-
-const isCLI = process.argv.some((value) => realpath(value)?.endsWith(path.join('payload', 'bin.js')))
-const isProduction = process.env.NODE_ENV === 'production'
-const isCI = !!process.env.CI
-
-// Cloudflare-compatible structured logger
-const createLog =
-  (level: string, fn: typeof console.log) => (objOrMsg: object | string, msg?: string) => {
-    if (typeof objOrMsg === 'string') {
-      fn(JSON.stringify({ level, msg: objOrMsg }))
-    } else {
-      fn(JSON.stringify({ level, ...objOrMsg, msg: msg ?? (objOrMsg as { msg?: string }).msg }))
-    }
-  }
-
-const cloudflareLogger = {
-  level: process.env.PAYLOAD_LOG_LEVEL || 'info',
-  trace: createLog('trace', console.debug),
-  debug: createLog('debug', console.debug),
-  info: createLog('info', console.log),
-  warn: createLog('warn', console.warn),
-  error: createLog('error', console.error),
-  fatal: createLog('fatal', console.error),
-  silent: () => {},
-} as any
-
-// During CI builds, provide mock bindings (real bindings come at runtime on Workers)
-let cloudflare: any
-if (isCI) {
-  cloudflare = { env: { D1: {}, R2: {} } }
-} else if (isCLI || !isProduction) {
-  cloudflare = await getCloudflareContextFromWrangler()
-} else {
-  cloudflare = await getCloudflareContext({ async: true })
-}
 
 export default buildConfig({
   admin: {
@@ -65,266 +25,305 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [
-    Users,
-    Media,
-    Clients,
-    Caregivers,
-    Services,
-    Shifts,
-    Timesheets,
-    Invoices,
-    Leads,
-  ],
-  editor: lexicalEditor(),
-  secret: process.env.PAYLOAD_SECRET || '',
+  collections: [Users, Media, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
+  secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
-
-  // Disable GraphQL (not needed, and playground breaks CI builds)
+  db: sqliteAdapter({
+    client: {
+      url: process.env.DATABASE_URL || 'file:./database.db',
+    },
+  }),
+  sharp,
   graphQL: false,
-
-  // D1 SQLite adapter
-  db: sqliteD1Adapter({ binding: cloudflare.env.D1 }),
-
-  // Structured logging in production
-  logger: isProduction ? cloudflareLogger : undefined,
-
-  // CORS — allow all origins
   cors: '*',
-
-  // R2 storage for media uploads
-  plugins: [
-    r2Storage({
-      bucket: cloudflare.env.R2,
-      collections: { media: true },
-    }),
-  ],
-
-  // Custom API endpoints
   endpoints: [
-    // Public lead submission endpoint (for landing page forms)
     {
       path: '/submit-lead',
       method: 'post',
       handler: async (req) => {
         try {
-          const body = await req.json()
-          const { firstName, lastName, email, phone, careType, message, source } = body
-
-          if (!firstName || !lastName || !email) {
-            return Response.json(
-              { error: 'First name, last name, and email are required.' },
-              { status: 400 },
-            )
-          }
-
+          const data = await req.json()
           const lead = await req.payload.create({
             collection: 'leads',
             data: {
-              firstName,
-              lastName,
-              email,
-              phone: phone || '',
-              careType: careType || null,
-              message: message || '',
-              source: source || 'website',
+              firstName: data.firstName || '',
+              lastName: data.lastName || '',
+              email: data.email || '',
+              phone: data.phone || '',
+              careType: data.careType || 'home_care',
+              message: data.message || '',
+              source: data.source || 'landing_page',
               status: 'new',
             },
-            overrideAccess: true,
           })
-
           return Response.json({ success: true, id: lead.id })
         } catch (error) {
-          return Response.json(
-            { error: 'Failed to submit lead. Please try again.' },
-            { status: 500 },
-          )
+          return Response.json({ success: false, error: 'Failed to submit lead' }, { status: 500 })
         }
       },
     },
-    // Demo request endpoint
     {
       path: '/request-demo',
       method: 'post',
       handler: async (req) => {
         try {
-          const body = await req.json()
-          const { firstName, lastName, email, phone, message } = body
-
-          if (!firstName || !lastName || !email) {
-            return Response.json(
-              { error: 'First name, last name, and email are required.' },
-              { status: 400 },
-            )
-          }
-
+          const data = await req.json()
           const lead = await req.payload.create({
             collection: 'leads',
             data: {
-              firstName,
-              lastName,
-              email,
-              phone: phone || '',
-              message: message || 'Demo request',
-              source: 'website',
-              careType: null,
+              firstName: data.firstName || data.name || '',
+              lastName: data.lastName || '',
+              email: data.email || '',
+              phone: data.phone || '',
+              company: data.company || '',
+              message: data.message || 'Demo request',
+              source: 'demo_request',
               status: 'new',
-              notes: 'DEMO REQUEST',
             },
-            overrideAccess: true,
           })
-
           return Response.json({ success: true, id: lead.id })
         } catch (error) {
-          return Response.json(
-            { error: 'Failed to submit demo request. Please try again.' },
-            { status: 500 },
-          )
+          return Response.json({ success: false, error: 'Failed to submit demo request' }, { status: 500 })
         }
       },
     },
-    // Convert Lead to Client (authenticated)
     {
       path: '/convert-lead',
       method: 'post',
       handler: async (req) => {
         try {
-          if (!req.user) {
-            return Response.json({ error: 'Authentication required.' }, { status: 401 })
+          const data = await req.json()
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
           }
-
-          const body = await req.json()
-          const { leadId } = body
-
+          const leadId = data.leadId
           if (!leadId) {
-            return Response.json({ error: 'leadId is required.' }, { status: 400 })
+            return Response.json({ success: false, error: 'leadId is required' }, { status: 400 })
           }
-
-          // Fetch the lead
-          const lead = await req.payload.findByID({
-            collection: 'leads',
-            id: leadId,
-            overrideAccess: true,
-          })
-
+          const lead = await req.payload.findByID({ collection: 'leads', id: leadId })
           if (!lead) {
-            return Response.json({ error: 'Lead not found.' }, { status: 404 })
+            return Response.json({ success: false, error: 'Lead not found' }, { status: 404 })
           }
-
-          if (lead.status === 'converted') {
-            return Response.json(
-              { error: 'Lead already converted.', clientId: lead.convertedClientId },
-              { status: 400 },
-            )
-          }
-
-          // Create client from lead data
           const client = await req.payload.create({
             collection: 'clients',
             data: {
-              firstName: lead.firstName,
-              lastName: lead.lastName,
+              firstName: lead.firstName || '',
+              lastName: lead.lastName || '',
               email: lead.email || '',
               phone: lead.phone || '',
-              careNeeds: lead.careType ? `Care type: ${lead.careType}. ${lead.message || ''}` : lead.message || '',
-              leadSource: lead.source || 'website',
-              status: 'pending',
-              notes: `Converted from lead #${lead.id} on ${new Date().toISOString().split('T')[0]}`,
+              status: 'active',
+              leadSource: 'website',
             },
-            overrideAccess: true,
           })
-
-          // Update lead status to converted
           await req.payload.update({
             collection: 'leads',
             id: leadId,
             data: {
               status: 'converted',
-              convertedClientId: client.id,
+              convertedClientId: String(client.id),
             },
-            overrideAccess: true,
           })
-
-          return Response.json({
-            success: true,
-            message: 'Lead converted to client successfully.',
-            clientId: client.id,
-            leadId: lead.id,
-          })
+          return Response.json({ success: true, clientId: client.id })
         } catch (error) {
-          return Response.json(
-            { error: 'Failed to convert lead. Please try again.' },
-            { status: 500 },
-          )
+          return Response.json({ success: false, error: 'Failed to convert lead' }, { status: 500 })
         }
       },
     },
-    // Dashboard stats endpoint (authenticated)
     {
       path: '/dashboard-stats',
       method: 'get',
       handler: async (req) => {
         try {
-          if (!req.user) {
-            return Response.json({ error: 'Authentication required.' }, { status: 401 })
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
           }
-
-          const leads = await req.payload.find({ collection: 'leads', limit: 0, overrideAccess: true })
-          const clients = await req.payload.find({ collection: 'clients', limit: 0, overrideAccess: true })
-          const caregivers = await req.payload.find({ collection: 'caregivers', limit: 0, overrideAccess: true })
-          const shifts = await req.payload.find({ collection: 'shifts', limit: 0, overrideAccess: true })
-
-          // Count leads by status
-          const allLeads = await req.payload.find({ collection: 'leads', limit: 100, overrideAccess: true })
-          const leadsByStatus = { new: 0, contacted: 0, qualified: 0, converted: 0, lost: 0 }
-          for (const l of allLeads.docs) {
-            if (leadsByStatus[l.status] !== undefined) leadsByStatus[l.status]++
-          }
-
-          // Count clients by status
-          const allClients = await req.payload.find({ collection: 'clients', limit: 100, overrideAccess: true })
-          const clientsByStatus = { active: 0, inactive: 0, pending: 0 }
-          for (const c of allClients.docs) {
-            if (clientsByStatus[c.status] !== undefined) clientsByStatus[c.status]++
-          }
-
-          // Count shifts by status
-          const allShifts = await req.payload.find({ collection: 'shifts', limit: 100, overrideAccess: true })
-          const shiftsByStatus = { scheduled: 0, in_progress: 0, completed: 0, cancelled: 0 }
-          for (const s of allShifts.docs) {
-            if (shiftsByStatus[s.status] !== undefined) shiftsByStatus[s.status]++
-          }
-
+          const leads = await req.payload.find({ collection: 'leads', limit: 0 })
+          const clients = await req.payload.find({ collection: 'clients', limit: 0 })
+          const caregivers = await req.payload.find({ collection: 'caregivers', limit: 0 })
+          const shifts = await req.payload.find({ collection: 'shifts', limit: 0 })
+          const timesheets = await req.payload.find({ collection: 'timesheets', limit: 0 })
+          const invoices = await req.payload.find({ collection: 'invoices', limit: 0 })
           return Response.json({
-            totalLeads: leads.totalDocs,
-            totalClients: clients.totalDocs,
-            totalCaregivers: caregivers.totalDocs,
-            totalShifts: shifts.totalDocs,
-            leadsByStatus,
-            clientsByStatus,
-            shiftsByStatus,
-            recentLeads: allLeads.docs.slice(0, 5),
+            success: true,
+            stats: {
+              leads: leads.totalDocs,
+              clients: clients.totalDocs,
+              caregivers: caregivers.totalDocs,
+              shifts: shifts.totalDocs,
+              timesheets: timesheets.totalDocs,
+              invoices: invoices.totalDocs,
+            },
           })
         } catch (error) {
-          return Response.json(
-            { error: 'Failed to fetch dashboard stats.' },
-            { status: 500 },
-          )
+          return Response.json({ success: false, error: 'Failed to get stats' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/clock-in',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.shiftId) {
+            return Response.json({ success: false, error: 'shiftId is required' }, { status: 400 })
+          }
+          const shift = await req.payload.findByID({ collection: 'shifts', id: data.shiftId })
+          if (!shift) {
+            return Response.json({ success: false, error: 'Shift not found' }, { status: 404 })
+          }
+          const now = new Date().toISOString()
+          const timesheet = await req.payload.create({
+            collection: 'timesheets',
+            data: {
+              shift: shift.id,
+              caregiver: shift.caregiver,
+              client: shift.client,
+              date: now,
+              clockIn: now,
+              status: 'clocked_in',
+              notes: data.notes || '',
+            },
+          })
+          await req.payload.update({
+            collection: 'shifts',
+            id: shift.id,
+            data: { status: 'in_progress' },
+          })
+          return Response.json({ success: true, timesheetId: timesheet.id })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to clock in' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/clock-out',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.timesheetId) {
+            return Response.json({ success: false, error: 'timesheetId is required' }, { status: 400 })
+          }
+          const timesheet = await req.payload.findByID({ collection: 'timesheets', id: data.timesheetId })
+          if (!timesheet) {
+            return Response.json({ success: false, error: 'Timesheet not found' }, { status: 404 })
+          }
+          const clockOut = new Date()
+          const clockIn = new Date(timesheet.clockIn)
+          const hoursWorked = Math.round(((clockOut.getTime() - clockIn.getTime()) / 3600000) * 100) / 100
+          const hourlyRate = data.hourlyRate || timesheet.hourlyRate || 0
+          const totalPay = Math.round(hoursWorked * hourlyRate * 100) / 100
+          await req.payload.update({
+            collection: 'timesheets',
+            id: data.timesheetId,
+            data: {
+              clockOut: clockOut.toISOString(),
+              hoursWorked: hoursWorked,
+              hourlyRate: hourlyRate,
+              totalPay: totalPay,
+              status: 'pending',
+            },
+          })
+          if (timesheet.shift) {
+            const shiftId = typeof timesheet.shift === 'object' ? timesheet.shift.id : timesheet.shift
+            await req.payload.update({
+              collection: 'shifts',
+              id: shiftId,
+              data: {
+                status: 'completed',
+                totalHours: hoursWorked,
+              },
+            })
+          }
+          return Response.json({ success: true, hoursWorked, totalPay })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to clock out' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/generate-invoice',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.clientId) {
+            return Response.json({ success: false, error: 'clientId is required' }, { status: 400 })
+          }
+          const periodStart = data.periodStart || new Date(Date.now() - 30 * 86400000).toISOString()
+          const periodEnd = data.periodEnd || new Date().toISOString()
+          const timesheets = await req.payload.find({
+            collection: 'timesheets',
+            where: {
+              client: { equals: data.clientId },
+              status: { equals: 'approved' },
+            },
+            limit: 1000,
+          })
+          let totalHours = 0
+          let totalAmount = 0
+          const sheets = timesheets.docs || []
+          for (const ts of sheets) {
+            totalHours += ts.hoursWorked || 0
+            totalAmount += ts.totalPay || 0
+          }
+          const hourlyRate = sheets.length > 0 && totalHours > 0 ? Math.round((totalAmount / totalHours) * 100) / 100 : data.hourlyRate || 0
+          if (totalAmount === 0 && data.amount) {
+            totalAmount = data.amount
+          }
+          const tax = data.taxRate ? Math.round(totalAmount * data.taxRate * 100) / 100 : 0
+          const grandTotal = Math.round((totalAmount + tax) * 100) / 100
+          const invoiceNumber = 'INV-' + Date.now().toString(36).toUpperCase()
+          const invoice = await req.payload.create({
+            collection: 'invoices',
+            data: {
+              client: data.clientId,
+              caregiver: data.caregiverId || null,
+              invoiceNumber: invoiceNumber,
+              periodStart: periodStart,
+              periodEnd: periodEnd,
+              totalHours: totalHours,
+              hourlyRate: hourlyRate,
+              amount: totalAmount,
+              tax: tax,
+              totalAmount: grandTotal,
+              status: 'draft',
+              issuedDate: new Date().toISOString(),
+              dueDate: new Date(Date.now() + 30 * 86400000).toISOString(),
+              notes: data.notes || '',
+            },
+          })
+          return Response.json({
+            success: true,
+            invoiceId: invoice.id,
+            invoiceNumber: invoiceNumber,
+            totalHours,
+            amount: totalAmount,
+            tax,
+            totalAmount: grandTotal,
+            timesheetsIncluded: sheets.length,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to generate invoice' }, { status: 500 })
         }
       },
     },
   ],
 })
-
-// Wrangler context helper for local dev & CLI
-function getCloudflareContextFromWrangler(): Promise<CloudflareContext> {
-  return import(/* webpackIgnore: true */ `${'__wrangler'.replaceAll('_', '')}`).then(
-    ({ getPlatformProxy }) =>
-      getPlatformProxy({
-        environment: process.env.CLOUDFLARE_ENV,
-        remoteBindings: isProduction,
-      } satisfies GetPlatformProxyOptions),
-  )
-}

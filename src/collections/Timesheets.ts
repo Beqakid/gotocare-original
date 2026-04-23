@@ -19,6 +19,16 @@ export const Timesheets: CollectionConfig = {
       required: true,
     },
     {
+      name: 'client',
+      type: 'relationship',
+      relationTo: 'clients',
+    },
+    {
+      name: 'date',
+      type: 'date',
+      required: true,
+    },
+    {
       name: 'clockIn',
       type: 'date',
       required: true,
@@ -40,6 +50,23 @@ export const Timesheets: CollectionConfig = {
     {
       name: 'hoursWorked',
       type: 'number',
+      admin: {
+        description: 'Auto-calculated on clock-out',
+      },
+    },
+    {
+      name: 'hourlyRate',
+      type: 'number',
+      admin: {
+        description: 'Rate at time of shift',
+      },
+    },
+    {
+      name: 'totalPay',
+      type: 'number',
+      admin: {
+        description: 'hoursWorked * hourlyRate',
+      },
     },
     {
       name: 'status',
@@ -47,10 +74,16 @@ export const Timesheets: CollectionConfig = {
       required: true,
       defaultValue: 'pending',
       options: [
-        { label: 'Pending', value: 'pending' },
+        { label: 'Clocked In', value: 'clocked_in' },
+        { label: 'Pending Review', value: 'pending' },
         { label: 'Approved', value: 'approved' },
         { label: 'Rejected', value: 'rejected' },
       ],
+    },
+    {
+      name: 'approvedBy',
+      type: 'relationship',
+      relationTo: 'users',
     },
     {
       name: 'notes',

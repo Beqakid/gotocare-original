@@ -40,6 +40,14 @@ export const Shifts: CollectionConfig = {
       required: true,
     },
     {
+      name: 'totalHours',
+      type: 'number',
+      admin: {
+        readOnly: true,
+        description: 'Auto-calculated from start/end time',
+      },
+    },
+    {
       name: 'status',
       type: 'select',
       required: true,
@@ -49,6 +57,25 @@ export const Shifts: CollectionConfig = {
         { label: 'In Progress', value: 'in_progress' },
         { label: 'Completed', value: 'completed' },
         { label: 'Cancelled', value: 'cancelled' },
+        { label: 'No Show', value: 'no_show' },
+      ],
+    },
+    {
+      name: 'recurringGroupId',
+      type: 'text',
+      admin: {
+        description: 'Groups recurring shifts together',
+      },
+    },
+    {
+      name: 'priority',
+      type: 'select',
+      defaultValue: 'normal',
+      options: [
+        { label: 'Low', value: 'low' },
+        { label: 'Normal', value: 'normal' },
+        { label: 'High', value: 'high' },
+        { label: 'Urgent', value: 'urgent' },
       ],
     },
     {

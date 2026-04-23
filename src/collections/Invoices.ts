@@ -14,15 +14,48 @@ export const Invoices: CollectionConfig = {
       required: true,
     },
     {
+      name: 'caregiver',
+      type: 'relationship',
+      relationTo: 'caregivers',
+    },
+    {
       name: 'invoiceNumber',
       type: 'text',
       required: true,
       unique: true,
     },
     {
+      name: 'periodStart',
+      type: 'date',
+    },
+    {
+      name: 'periodEnd',
+      type: 'date',
+    },
+    {
+      name: 'totalHours',
+      type: 'number',
+    },
+    {
+      name: 'hourlyRate',
+      type: 'number',
+    },
+    {
       name: 'amount',
       type: 'number',
       required: true,
+    },
+    {
+      name: 'tax',
+      type: 'number',
+      defaultValue: 0,
+    },
+    {
+      name: 'totalAmount',
+      type: 'number',
+      admin: {
+        description: 'amount + tax',
+      },
     },
     {
       name: 'status',
@@ -46,29 +79,18 @@ export const Invoices: CollectionConfig = {
       type: 'date',
     },
     {
-      name: 'lineItems',
-      type: 'array',
-      fields: [
-        {
-          name: 'description',
-          type: 'text',
-          required: true,
-        },
-        {
-          name: 'quantity',
-          type: 'number',
-          required: true,
-        },
-        {
-          name: 'rate',
-          type: 'number',
-          required: true,
-        },
-        {
-          name: 'lineTotal',
-          type: 'number',
-          required: true,
-        },
+      name: 'paidDate',
+      type: 'date',
+    },
+    {
+      name: 'paymentMethod',
+      type: 'select',
+      options: [
+        { label: 'Bank Transfer', value: 'bank_transfer' },
+        { label: 'Check', value: 'check' },
+        { label: 'Credit Card', value: 'credit_card' },
+        { label: 'Cash', value: 'cash' },
+        { label: 'Insurance', value: 'insurance' },
       ],
     },
     {
