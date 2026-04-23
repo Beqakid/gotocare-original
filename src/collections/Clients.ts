@@ -14,6 +14,12 @@ export const Clients: CollectionConfig = {
       admin: { description: 'Agency this client belongs to' },
     },
     {
+      name: 'location',
+      type: 'relationship',
+      relationTo: 'locations',
+      admin: { description: 'Branch/location serving this client' },
+    },
+    {
       name: 'firstName',
       type: 'text',
       required: true,

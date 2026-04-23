@@ -14,6 +14,12 @@ export const Shifts: CollectionConfig = {
       admin: { description: 'Agency this shift belongs to' },
     },
     {
+      name: 'location',
+      type: 'relationship',
+      relationTo: 'locations',
+      admin: { description: 'Branch/location for this shift' },
+    },
+    {
       name: 'client',
       type: 'relationship',
       relationTo: 'clients',

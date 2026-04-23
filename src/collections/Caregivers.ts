@@ -14,6 +14,12 @@ export const Caregivers: CollectionConfig = {
       admin: { description: 'Agency this caregiver belongs to' },
     },
     {
+      name: 'location',
+      type: 'relationship',
+      relationTo: 'locations',
+      admin: { description: 'Branch/location this caregiver works from' },
+    },
+    {
       name: 'linkedUser',
       type: 'relationship',
       relationTo: 'users',
