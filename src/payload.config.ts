@@ -1348,5 +1348,202 @@ export default buildConfig({
         }
       },
     },
+    // ====== STRIPE PAYMENT FLOW ======
+    {
+      path: '/client-portal/create-checkout',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          if (!data.invoiceId || !data.clientId) {
+            return Response.json({ error: 'invoiceId and clientId are required' }, { status: 400 })
+          }
+          const invoice = await req.payload.findByID({ collection: 'invoices', id: data.invoiceId, depth: 1, overrideAccess: true })
+          if (!invoice) {
+            return Response.json({ error: 'Invoice not found' }, { status: 404 })
+          }
+          if (invoice.status === 'paid') {
+            return Response.json({ error: 'Invoice is already paid' }, { status: 400 })
+          }
+          const amount = Math.round((invoice.totalAmount || invoice.amount || 0) * 100)
+          if (amount <= 0) {
+            return Response.json({ error: 'Invalid invoice amount' }, { status: 400 })
+          }
+          const clientName = invoice.client && typeof invoice.client === 'object'
+            ? `${invoice.client.firstName} ${invoice.client.lastName}`
+            : 'Client'
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          if (!stripeKey) {
+            return Response.json({ error: 'Payment system not configured' }, { status: 500 })
+          }
+          const params = new URLSearchParams()
+          params.append('line_items[0][price_data][currency]', 'usd')
+          params.append('line_items[0][price_data][product_data][name]', `Invoice ${invoice.invoiceNumber || 'INV-' + invoice.id}`)
+          params.append('line_items[0][price_data][product_data][description]', `Care services for ${clientName}`)
+          params.append('line_items[0][price_data][unit_amount]', String(amount))
+          params.append('line_items[0][quantity]', '1')
+          params.append('mode', 'payment')
+          params.append('success_url', `https://gotocare-original.jjioji.workers.dev/api/payment-success?session_id={CHECKOUT_SESSION_ID}`)
+          params.append('cancel_url', `https://gotocare-original.jjioji.workers.dev/api/payment-cancel`)
+          params.append('metadata[invoice_id]', String(invoice.id))
+          params.append('metadata[client_id]', String(data.clientId))
+          if (data.email) {
+            params.append('customer_email', data.email)
+          }
+          const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${stripeKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: params.toString(),
+          })
+          const session = await stripeRes.json()
+          if (!stripeRes.ok) {
+            return Response.json({ error: session.error?.message || 'Failed to create checkout' }, { status: 500 })
+          }
+          await req.payload.update({
+            collection: 'invoices',
+            id: invoice.id,
+            data: { stripeSessionId: session.id, status: 'pending' },
+            overrideAccess: true,
+          })
+          return Response.json({ success: true, checkoutUrl: session.url, sessionId: session.id })
+        } catch (error) {
+          return Response.json({ error: 'Failed to create checkout session' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/payment-success',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const sessionId = url.searchParams.get('session_id')
+          if (!sessionId) {
+            return new Response('<h1>Invalid payment session</h1>', { headers: { 'Content-Type': 'text/html' } })
+          }
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          const stripeRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${sessionId}`, {
+            headers: { 'Authorization': `Bearer ${stripeKey}` },
+          })
+          const session = await stripeRes.json()
+          if (session.payment_status === 'paid') {
+            const invoiceId = session.metadata?.invoice_id
+            if (invoiceId) {
+              await req.payload.update({
+                collection: 'invoices',
+                id: invoiceId,
+                data: {
+                  status: 'paid',
+                  paidDate: new Date().toISOString(),
+                  paymentMethod: 'stripe',
+                  stripePaymentId: session.payment_intent,
+                  stripeSessionId: sessionId,
+                },
+                overrideAccess: true,
+              })
+            }
+            const amountStr = session.amount_total ? (session.amount_total / 100).toFixed(2) : '0.00'
+            return new Response(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Successful - GoToCare</title>
+<style>
+body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);display:flex;align-items:center;justify-content:center;min-height:100vh}
+.card{background:#fff;border-radius:20px;padding:48px;text-align:center;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,.2)}
+.check{width:80px;height:80px;background:#10b981;border-radius:50%;display:flex;align-items:center;justify-content:center;margin:0 auto 24px}
+.check svg{width:40px;height:40px;fill:none;stroke:#fff;stroke-width:3}
+h1{color:#1e293b;font-size:24px;margin-bottom:8px}
+p{color:#64748b;font-size:16px;line-height:1.5}
+.amount{font-size:32px;font-weight:700;color:#667eea;margin:16px 0}
+</style></head><body>
+<div class="card">
+<div class="check"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+<h1>Payment Successful!</h1>
+<div class="amount">$${amountStr}</div>
+<p>Thank you for your payment. Your invoice has been marked as paid.</p>
+<p style="margin-top:24px;font-size:14px;color:#94a3b8">You can close this window and return to your portal.</p>
+</div></body></html>`, { headers: { 'Content-Type': 'text/html' } })
+          } else {
+            return new Response(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Payment Processing</title>
+<style>body{margin:0;padding:40px;font-family:sans-serif;text-align:center;background:#f8fafc}
+h1{color:#f59e0b;margin-top:80px}p{color:#64748b}</style></head>
+<body><h1>&#9203; Payment Processing</h1><p>Your payment is being processed. The invoice will be updated shortly.</p></body></html>`,
+              { headers: { 'Content-Type': 'text/html' } })
+          }
+        } catch (error) {
+          return new Response('<h1>Error processing payment</h1>', { status: 500, headers: { 'Content-Type': 'text/html' } })
+        }
+      },
+    },
+    {
+      path: '/payment-cancel',
+      method: 'get',
+      handler: async (req) => {
+        return new Response(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Payment Cancelled - GoToCare</title>
+<style>body{margin:0;padding:40px;font-family:sans-serif;text-align:center;background:#f8fafc}
+h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
+<body><h1>Payment Cancelled</h1><p>Your payment was cancelled. You can return to your portal and try again.</p></body></html>`,
+          { headers: { 'Content-Type': 'text/html' } })
+      },
+    },
+    {
+      path: '/stripe-webhook',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.text()
+          const event = JSON.parse(body)
+          if (event.type === 'checkout.session.completed') {
+            const session = event.data.object
+            const invoiceId = session.metadata?.invoice_id
+            if (invoiceId && session.payment_status === 'paid') {
+              await req.payload.update({
+                collection: 'invoices',
+                id: invoiceId,
+                data: {
+                  status: 'paid',
+                  paidDate: new Date().toISOString(),
+                  paymentMethod: 'stripe',
+                  stripePaymentId: session.payment_intent,
+                  stripeSessionId: session.id,
+                },
+                overrideAccess: true,
+              })
+            }
+          }
+          return Response.json({ received: true })
+        } catch (error) {
+          return Response.json({ error: 'Webhook processing failed' }, { status: 400 })
+        }
+      },
+    },
+    // ====== CHECK INVOICE PAYMENT STATUS ======
+    {
+      path: '/client-portal/check-payment',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const invoiceId = url.searchParams.get('invoiceId')
+          if (!invoiceId) {
+            return Response.json({ error: 'invoiceId is required' }, { status: 400 })
+          }
+          const invoice = await req.payload.findByID({ collection: 'invoices', id: invoiceId, depth: 0, overrideAccess: true })
+          return Response.json({
+            success: true,
+            invoiceId: invoice.id,
+            status: invoice.status,
+            paidDate: invoice.paidDate,
+            stripePaymentId: invoice.stripePaymentId,
+          })
+        } catch (error) {
+          return Response.json({ error: 'Failed to check payment status' }, { status: 500 })
+        }
+      },
+    },
   ],
 })

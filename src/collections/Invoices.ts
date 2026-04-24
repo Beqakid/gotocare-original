@@ -72,6 +72,7 @@ export const Invoices: CollectionConfig = {
       options: [
         { label: 'Draft', value: 'draft' },
         { label: 'Sent', value: 'sent' },
+        { label: 'Pending', value: 'pending' },
         { label: 'Paid', value: 'paid' },
         { label: 'Overdue', value: 'overdue' },
         { label: 'Cancelled', value: 'cancelled' },
@@ -98,7 +99,18 @@ export const Invoices: CollectionConfig = {
         { label: 'Check', value: 'check' },
         { label: 'Cash', value: 'cash' },
         { label: 'Insurance', value: 'insurance' },
+        { label: 'Stripe', value: 'stripe' },
       ],
+    },
+    {
+      name: 'stripeSessionId',
+      type: 'text',
+      admin: { description: 'Stripe Checkout session ID' },
+    },
+    {
+      name: 'stripePaymentId',
+      type: 'text',
+      admin: { description: 'Stripe Payment Intent ID' },
     },
     {
       name: 'notes',
