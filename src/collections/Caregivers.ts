@@ -45,6 +45,11 @@ export const Caregivers: CollectionConfig = {
       type: 'text',
     },
     {
+      name: 'photoUrl',
+      type: 'text',
+      admin: { description: 'Profile photo URL' },
+    },
+    {
       name: 'addressStreet',
       type: 'text',
     },
@@ -59,6 +64,41 @@ export const Caregivers: CollectionConfig = {
     {
       name: 'addressZip',
       type: 'text',
+    },
+    {
+      name: 'emergencyContactName',
+      type: 'text',
+    },
+    {
+      name: 'emergencyContactPhone',
+      type: 'text',
+    },
+    {
+      name: 'emergencyContactRelation',
+      type: 'text',
+    },
+    {
+      name: 'skills',
+      type: 'select',
+      hasMany: true,
+      options: [
+        { label: 'Personal Care', value: 'personal_care' },
+        { label: 'Medication Management', value: 'medication_mgmt' },
+        { label: 'Dementia Care', value: 'dementia_care' },
+        { label: 'Alzheimer Care', value: 'alzheimer_care' },
+        { label: 'Wound Care', value: 'wound_care' },
+        { label: 'Mobility Assistance', value: 'mobility_assist' },
+        { label: 'Meal Preparation', value: 'meal_prep' },
+        { label: 'Light Housekeeping', value: 'housekeeping' },
+        { label: 'Companionship', value: 'companionship' },
+        { label: 'Transportation', value: 'transportation' },
+        { label: 'Physical Therapy Aid', value: 'pt_aid' },
+        { label: 'Hospice Care', value: 'hospice_care' },
+        { label: 'Pediatric Care', value: 'pediatric_care' },
+        { label: 'Post-Surgery Care', value: 'post_surgery' },
+        { label: 'Vital Signs Monitoring', value: 'vitals_monitoring' },
+      ],
+      admin: { description: 'Care skills and specializations' },
     },
     {
       name: 'certifications',
@@ -81,7 +121,82 @@ export const Caregivers: CollectionConfig = {
     {
       name: 'availability',
       type: 'textarea',
-      admin: { description: 'Available days/times' },
+      admin: { description: 'Available days/times (freeform)' },
+    },
+    {
+      name: 'availabilityJson',
+      type: 'json',
+      admin: { description: 'Structured weekly availability: { mon: { start, end }, tue: ... }' },
+    },
+    {
+      name: 'maxHoursPerWeek',
+      type: 'number',
+      admin: { description: 'Maximum hours caregiver wants to work per week' },
+    },
+    {
+      name: 'onboardingStatus',
+      type: 'select',
+      defaultValue: 'pending',
+      options: [
+        { label: 'Invited', value: 'invited' },
+        { label: 'In Progress', value: 'in_progress' },
+        { label: 'Under Review', value: 'review' },
+        { label: 'Active', value: 'active' },
+        { label: 'Rejected', value: 'rejected' },
+        { label: 'Pending', value: 'pending' },
+      ],
+      admin: { description: 'Onboarding progress status' },
+    },
+    {
+      name: 'onboardingProgress',
+      type: 'json',
+      admin: { description: 'Track which onboarding steps are complete: { profile: true, documents: false, ... }' },
+    },
+    {
+      name: 'complianceStatus',
+      type: 'select',
+      defaultValue: 'pending',
+      options: [
+        { label: 'Pending', value: 'pending' },
+        { label: 'Compliant', value: 'compliant' },
+        { label: 'Expired', value: 'expired' },
+        { label: 'Non-Compliant', value: 'non_compliant' },
+      ],
+      admin: { description: 'Overall compliance status based on document checks' },
+    },
+    {
+      name: 'inviteToken',
+      type: 'text',
+      admin: { description: 'Unique token for onboarding invite link' },
+    },
+    {
+      name: 'invitedAt',
+      type: 'date',
+    },
+    {
+      name: 'onboardingCompletedAt',
+      type: 'date',
+    },
+    {
+      name: 'trainingAcknowledged',
+      type: 'checkbox',
+      defaultValue: false,
+      admin: { description: 'Has caregiver acknowledged agency training/policies' },
+    },
+    {
+      name: 'hipaaAcknowledged',
+      type: 'checkbox',
+      defaultValue: false,
+      admin: { description: 'Has caregiver acknowledged HIPAA compliance' },
+    },
+    {
+      name: 'eSignature',
+      type: 'text',
+      admin: { description: 'E-signature (typed name) for agreements' },
+    },
+    {
+      name: 'eSignatureDate',
+      type: 'date',
     },
     {
       name: 'status',
@@ -92,6 +207,7 @@ export const Caregivers: CollectionConfig = {
         { label: 'Active', value: 'active' },
         { label: 'Inactive', value: 'inactive' },
         { label: 'Pending', value: 'pending' },
+        { label: 'Onboarding', value: 'onboarding' },
       ],
     },
     {

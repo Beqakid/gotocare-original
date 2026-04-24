@@ -18,6 +18,7 @@ import { Invoices } from './collections/Invoices'
 import { Leads } from './collections/Leads'
 import { Agencies } from './collections/Agencies'
 import { Locations } from './collections/Locations'
+import { CaregiverDocuments } from './collections/CaregiverDocuments'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -48,7 +49,7 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads],
+  collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads, CaregiverDocuments],
   secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
@@ -62,7 +63,7 @@ export default buildConfig({
       collections: { media: true },
     }),
   ],
-    endpoints: [
+  endpoints: [
     {
       path: '/submit-lead',
       method: 'post',
@@ -80,6 +81,10 @@ export default buildConfig({
             status: 'new',
             agency: data.agencyId || null,
             location: data.locationId || null,
+            requiredSkills: data.requiredSkills || [],
+            preferredLanguage: data.preferredLanguage || '',
+            careHoursPerWeek: data.careHoursPerWeek || null,
+            urgency: data.urgency || 'routine',
           }
           const lead = await req.payload.create({
             collection: 'leads',
@@ -144,9 +149,12 @@ export default buildConfig({
               email: lead.email || '',
               phone: lead.phone || '',
               status: 'active',
-              leadSource: 'website',
+              leadSource: lead.source || 'website',
               agency: agencyId,
               location: locationId,
+              requiredSkills: lead.requiredSkills || [],
+              preferredLanguage: lead.preferredLanguage || '',
+              careHoursPerWeek: lead.careHoursPerWeek || null,
             },
           })
           await req.payload.update({
@@ -206,6 +214,9 @@ export default buildConfig({
             const locs = await req.payload.find({ collection: 'locations', limit: 100 })
             locations = locs.docs.map((l) => ({ id: l.id, name: l.name, city: l.addressCity, state: l.addressState, agency: l.agency }))
           }
+          // Count onboarding caregivers
+          const onboardingWhere = { ...agencyFilter, onboardingStatus: { in: ['invited', 'in_progress', 'review'] } }
+          const onboarding = await req.payload.find({ collection: 'caregivers', where: onboardingWhere, limit: 0 })
           return Response.json({
             success: true,
             stats: {
@@ -216,6 +227,7 @@ export default buildConfig({
               timesheets: timesheets.totalDocs,
               invoices: invoices.totalDocs,
               agencies: agencyCount,
+              onboardingCaregivers: onboarding.totalDocs,
             },
             locations: locations,
           })
@@ -513,7 +525,6 @@ export default buildConfig({
               maxCaregivers: 10,
             },
           })
-          // Create default HQ location
           const locationSlug = slug + '-hq'
           const location = await req.payload.create({
             collection: 'locations',
@@ -600,6 +611,472 @@ export default buildConfig({
           })
         } catch (error) {
           return Response.json({ success: false, error: 'Failed to fetch locations' }, { status: 500 })
+        }
+      },
+    },
+    // ====== CAREGIVER-CLIENT MATCHING ALGORITHM ======
+    {
+      path: '/match-caregivers',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const url = new URL(req.url)
+          const leadId = url.searchParams.get('leadId')
+          const clientId = url.searchParams.get('clientId')
+          if (!leadId && !clientId) {
+            return Response.json({ success: false, error: 'leadId or clientId is required' }, { status: 400 })
+          }
+
+          // Fetch the lead or client to get requirements
+          let target = null
+          if (leadId) {
+            target = await req.payload.findByID({ collection: 'leads', id: leadId, depth: 0 })
+          } else {
+            target = await req.payload.findByID({ collection: 'clients', id: clientId, depth: 0 })
+          }
+          if (!target) {
+            return Response.json({ success: false, error: 'Lead/Client not found' }, { status: 404 })
+          }
+
+          // Determine agency scope
+          const agencyId = target.agency || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
+
+          // Build caregiver query — same agency, active or onboarding-complete
+          const cgWhere = {}
+          if (agencyId) {
+            cgWhere.agency = { equals: agencyId }
+          }
+          cgWhere.status = { equals: 'active' }
+
+          const caregivers = await req.payload.find({
+            collection: 'caregivers',
+            where: cgWhere,
+            limit: 200,
+            depth: 0,
+          })
+
+          // Get current shift counts for workload balancing
+          const shiftCounts = {}
+          for (const cg of caregivers.docs) {
+            const shifts = await req.payload.find({
+              collection: 'shifts',
+              where: {
+                caregiver: { equals: cg.id },
+                status: { in: ['scheduled', 'in_progress'] },
+              },
+              limit: 0,
+            })
+            shiftCounts[cg.id] = shifts.totalDocs
+          }
+
+          // Get document compliance status
+          const complianceMap = {}
+          for (const cg of caregivers.docs) {
+            const docs = await req.payload.find({
+              collection: 'caregiver-documents',
+              where: { caregiver: { equals: cg.id } },
+              limit: 100,
+            })
+            const total = docs.totalDocs
+            const verified = docs.docs.filter((d) => d.status === 'verified').length
+            const expired = docs.docs.filter((d) => d.status === 'expired').length
+            complianceMap[cg.id] = { total, verified, expired, compliant: expired === 0 && total > 0 }
+          }
+
+          // Extract target requirements
+          const requiredSkills = target.requiredSkills || []
+          const preferredLang = (target.preferredLanguage || '').toLowerCase()
+          const targetLocation = target.location
+          const targetCity = (target.addressCity || '').toLowerCase()
+          const targetState = (target.addressState || '').toLowerCase()
+
+          // Score each caregiver
+          const scored = caregivers.docs.map((cg) => {
+            let score = 0
+            const breakdown = {}
+
+            // 1. LOCATION MATCH (max 25 points)
+            const cgLocation = cg.location
+            const locationId = typeof targetLocation === 'object' ? targetLocation?.id : targetLocation
+            const cgLocationId = typeof cgLocation === 'object' ? cgLocation?.id : cgLocation
+            if (locationId && cgLocationId && String(locationId) === String(cgLocationId)) {
+              score += 25
+              breakdown.location = 25
+            } else {
+              // Partial: same city/state
+              const cgCity = (cg.addressCity || '').toLowerCase()
+              const cgState = (cg.addressState || '').toLowerCase()
+              if (targetCity && cgCity === targetCity) {
+                score += 15
+                breakdown.location = 15
+              } else if (targetState && cgState === targetState) {
+                score += 8
+                breakdown.location = 8
+              } else {
+                breakdown.location = 0
+              }
+            }
+
+            // 2. SKILLS MATCH (max 30 points)
+            const cgSkills = cg.skills || []
+            if (requiredSkills.length > 0 && cgSkills.length > 0) {
+              const matched = requiredSkills.filter((s) => cgSkills.includes(s)).length
+              const skillScore = Math.round((matched / requiredSkills.length) * 30)
+              score += skillScore
+              breakdown.skills = skillScore
+              breakdown.skillsMatched = matched
+              breakdown.skillsRequired = requiredSkills.length
+            } else if (requiredSkills.length === 0) {
+              score += 15 // no requirements = partial credit
+              breakdown.skills = 15
+            } else {
+              breakdown.skills = 0
+            }
+
+            // 3. LANGUAGE MATCH (max 15 points)
+            const cgLangs = (cg.languages || '').toLowerCase()
+            if (preferredLang && cgLangs.includes(preferredLang)) {
+              score += 15
+              breakdown.language = 15
+            } else if (!preferredLang) {
+              score += 8
+              breakdown.language = 8
+            } else {
+              breakdown.language = 0
+            }
+
+            // 4. COMPLIANCE (max 10 points — required gate)
+            const compliance = complianceMap[cg.id] || { total: 0, verified: 0, expired: 0, compliant: false }
+            if (compliance.compliant) {
+              score += 10
+              breakdown.compliance = 10
+            } else if (compliance.expired > 0) {
+              score -= 20 // heavy penalty for expired docs
+              breakdown.compliance = -20
+            } else {
+              breakdown.compliance = 0
+            }
+
+            // 5. WORKLOAD (max 10 points — fewer shifts = more available)
+            const currentShifts = shiftCounts[cg.id] || 0
+            const maxHours = cg.maxHoursPerWeek || 40
+            if (currentShifts === 0) {
+              score += 10
+              breakdown.workload = 10
+            } else if (currentShifts < 5) {
+              score += 7
+              breakdown.workload = 7
+            } else if (currentShifts < 10) {
+              score += 3
+              breakdown.workload = 3
+            } else {
+              breakdown.workload = 0
+            }
+            breakdown.currentShifts = currentShifts
+
+            // 6. EXPERIENCE (max 10 points)
+            const exp = cg.experienceYears || 0
+            const expScore = Math.min(exp * 2, 10)
+            score += expScore
+            breakdown.experience = expScore
+
+            // Normalize to percentage (max possible = 100)
+            const matchPercent = Math.max(0, Math.min(100, score))
+
+            return {
+              caregiverId: cg.id,
+              firstName: cg.firstName,
+              lastName: cg.lastName,
+              email: cg.email,
+              phone: cg.phone,
+              skills: cg.skills || [],
+              languages: cg.languages,
+              experienceYears: cg.experienceYears,
+              hourlyRate: cg.hourlyRate,
+              location: cg.location,
+              addressCity: cg.addressCity,
+              addressState: cg.addressState,
+              complianceStatus: cg.complianceStatus,
+              matchScore: matchPercent,
+              breakdown: breakdown,
+            }
+          })
+
+          // Sort by score descending
+          scored.sort((a, b) => b.matchScore - a.matchScore)
+
+          // Return top 10
+          const topMatches = scored.slice(0, 10)
+
+          return Response.json({
+            success: true,
+            targetId: leadId || clientId,
+            targetType: leadId ? 'lead' : 'client',
+            totalCaregivers: caregivers.totalDocs,
+            matches: topMatches,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Matching failed' }, { status: 500 })
+        }
+      },
+    },
+    // ====== INVITE CAREGIVER (starts onboarding) ======
+    {
+      path: '/invite-caregiver',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.email || !data.firstName || !data.lastName) {
+            return Response.json({ success: false, error: 'email, firstName, lastName are required' }, { status: 400 })
+          }
+          const agencyId = data.agencyId || (user.agency ? (typeof user.agency === 'object' ? user.agency.id : user.agency) : null)
+          // Generate unique invite token
+          const token = 'INV-' + Date.now().toString(36) + '-' + Math.random().toString(36).substring(2, 8)
+          const caregiver = await req.payload.create({
+            collection: 'caregivers',
+            data: {
+              firstName: data.firstName,
+              lastName: data.lastName,
+              email: data.email,
+              phone: data.phone || '',
+              agency: agencyId,
+              location: data.locationId || null,
+              status: 'onboarding',
+              onboardingStatus: 'invited',
+              inviteToken: token,
+              invitedAt: new Date().toISOString(),
+              onboardingProgress: {
+                profile: false,
+                documents: false,
+                skills: false,
+                availability: false,
+                compliance: false,
+                training: false,
+                eSignature: false,
+              },
+            },
+          })
+          return Response.json({
+            success: true,
+            caregiverId: caregiver.id,
+            inviteToken: token,
+            inviteLink: '/onboarding?token=' + token,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to invite caregiver' }, { status: 500 })
+        }
+      },
+    },
+    // ====== GET ONBOARDING STATUS ======
+    {
+      path: '/onboarding-status',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const caregiverId = url.searchParams.get('caregiverId')
+          if (!token && !caregiverId) {
+            return Response.json({ success: false, error: 'token or caregiverId required' }, { status: 400 })
+          }
+          let caregiver = null
+          if (token) {
+            const results = await req.payload.find({
+              collection: 'caregivers',
+              where: { inviteToken: { equals: token } },
+              limit: 1,
+              depth: 1,
+            })
+            caregiver = results.docs[0] || null
+          } else {
+            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId, depth: 1 })
+          }
+          if (!caregiver) {
+            return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404 })
+          }
+          // Fetch documents
+          const docs = await req.payload.find({
+            collection: 'caregiver-documents',
+            where: { caregiver: { equals: caregiver.id } },
+            limit: 50,
+          })
+          const progress = caregiver.onboardingProgress || {}
+          const steps = ['profile', 'documents', 'skills', 'availability', 'compliance', 'training', 'eSignature']
+          const completed = steps.filter((s) => progress[s] === true).length
+          const percent = Math.round((completed / steps.length) * 100)
+          return Response.json({
+            success: true,
+            caregiverId: caregiver.id,
+            firstName: caregiver.firstName,
+            lastName: caregiver.lastName,
+            email: caregiver.email,
+            onboardingStatus: caregiver.onboardingStatus,
+            progress: progress,
+            completionPercent: percent,
+            stepsTotal: steps.length,
+            stepsCompleted: completed,
+            documents: docs.docs,
+            documentsCount: docs.totalDocs,
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to get onboarding status' }, { status: 500 })
+        }
+      },
+    },
+    // ====== COMPLETE ONBOARDING STEP ======
+    {
+      path: '/complete-onboarding-step',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          const { caregiverId, token, step, stepData } = data
+          if (!step) {
+            return Response.json({ success: false, error: 'step is required' }, { status: 400 })
+          }
+          let caregiver = null
+          if (caregiverId) {
+            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId })
+          } else if (token) {
+            const results = await req.payload.find({
+              collection: 'caregivers',
+              where: { inviteToken: { equals: token } },
+              limit: 1,
+            })
+            caregiver = results.docs[0] || null
+          }
+          if (!caregiver) {
+            return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404 })
+          }
+          const progress = caregiver.onboardingProgress || {}
+          const updateData = {}
+
+          // Handle each step
+          if (step === 'profile') {
+            if (stepData) {
+              if (stepData.phone) updateData.phone = stepData.phone
+              if (stepData.addressStreet) updateData.addressStreet = stepData.addressStreet
+              if (stepData.addressCity) updateData.addressCity = stepData.addressCity
+              if (stepData.addressState) updateData.addressState = stepData.addressState
+              if (stepData.addressZip) updateData.addressZip = stepData.addressZip
+              if (stepData.emergencyContactName) updateData.emergencyContactName = stepData.emergencyContactName
+              if (stepData.emergencyContactPhone) updateData.emergencyContactPhone = stepData.emergencyContactPhone
+              if (stepData.emergencyContactRelation) updateData.emergencyContactRelation = stepData.emergencyContactRelation
+              if (stepData.languages) updateData.languages = stepData.languages
+              if (stepData.photoUrl) updateData.photoUrl = stepData.photoUrl
+            }
+            progress.profile = true
+          } else if (step === 'skills') {
+            if (stepData && stepData.skills) {
+              updateData.skills = stepData.skills
+            }
+            if (stepData && stepData.experienceYears !== undefined) {
+              updateData.experienceYears = stepData.experienceYears
+            }
+            if (stepData && stepData.certifications) {
+              updateData.certifications = stepData.certifications
+            }
+            progress.skills = true
+          } else if (step === 'availability') {
+            if (stepData && stepData.availabilityJson) {
+              updateData.availabilityJson = stepData.availabilityJson
+            }
+            if (stepData && stepData.maxHoursPerWeek) {
+              updateData.maxHoursPerWeek = stepData.maxHoursPerWeek
+            }
+            if (stepData && stepData.availability) {
+              updateData.availability = stepData.availability
+            }
+            progress.availability = true
+          } else if (step === 'documents') {
+            progress.documents = true
+          } else if (step === 'compliance') {
+            progress.compliance = true
+          } else if (step === 'training') {
+            updateData.trainingAcknowledged = true
+            updateData.hipaaAcknowledged = stepData?.hipaaAcknowledged || false
+            progress.training = true
+          } else if (step === 'eSignature') {
+            if (stepData && stepData.signature) {
+              updateData.eSignature = stepData.signature
+              updateData.eSignatureDate = new Date().toISOString()
+            }
+            progress.eSignature = true
+          }
+
+          updateData.onboardingProgress = progress
+
+          // Check if all steps complete
+          const steps = ['profile', 'documents', 'skills', 'availability', 'compliance', 'training', 'eSignature']
+          const allDone = steps.every((s) => progress[s] === true)
+          if (allDone) {
+            updateData.onboardingStatus = 'review'
+            updateData.onboardingCompletedAt = new Date().toISOString()
+          } else {
+            updateData.onboardingStatus = 'in_progress'
+          }
+
+          await req.payload.update({
+            collection: 'caregivers',
+            id: caregiver.id,
+            data: updateData,
+          })
+
+          const completed = steps.filter((s) => progress[s] === true).length
+          return Response.json({
+            success: true,
+            step: step,
+            progress: progress,
+            completionPercent: Math.round((completed / steps.length) * 100),
+            allComplete: allDone,
+            onboardingStatus: allDone ? 'review' : 'in_progress',
+          })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to update onboarding' }, { status: 500 })
+        }
+      },
+    },
+    // ====== APPROVE/REJECT CAREGIVER ONBOARDING ======
+    {
+      path: '/approve-caregiver',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const user = req.user
+          if (!user) {
+            return Response.json({ success: false, error: 'Authentication required' }, { status: 401 })
+          }
+          const data = await req.json()
+          if (!data.caregiverId || !data.action) {
+            return Response.json({ success: false, error: 'caregiverId and action (approve/reject) required' }, { status: 400 })
+          }
+          const updateData = {}
+          if (data.action === 'approve') {
+            updateData.onboardingStatus = 'active'
+            updateData.status = 'active'
+            updateData.complianceStatus = 'compliant'
+            updateData.hireDate = new Date().toISOString()
+          } else if (data.action === 'reject') {
+            updateData.onboardingStatus = 'rejected'
+            updateData.status = 'inactive'
+          }
+          await req.payload.update({
+            collection: 'caregivers',
+            id: data.caregiverId,
+            data: updateData,
+          })
+          return Response.json({ success: true, action: data.action, caregiverId: data.caregiverId })
+        } catch (error) {
+          return Response.json({ success: false, error: 'Failed to process approval' }, { status: 500 })
         }
       },
     },
