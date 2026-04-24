@@ -895,6 +895,7 @@ export default buildConfig({
               where: { inviteToken: { equals: token } },
               limit: 1,
               depth: 1,
+              overrideAccess: true,
             })
             caregiver = results.docs[0] || null
           } else {
@@ -908,6 +909,7 @@ export default buildConfig({
             collection: 'caregiver-documents',
             where: { caregiver: { equals: caregiver.id } },
             limit: 50,
+            overrideAccess: true,
           })
           const progress = caregiver.onboardingProgress || {}
           const steps = ['profile', 'documents', 'skills', 'availability', 'compliance', 'training', 'eSignature']
@@ -951,6 +953,7 @@ export default buildConfig({
               collection: 'caregivers',
               where: { inviteToken: { equals: token } },
               limit: 1,
+              overrideAccess: true,
             })
             caregiver = results.docs[0] || null
           }
@@ -1029,6 +1032,7 @@ export default buildConfig({
             collection: 'caregivers',
             id: caregiver.id,
             data: updateData,
+            overrideAccess: true,
           })
 
           const completed = steps.filter((s) => progress[s] === true).length
