@@ -1682,5 +1682,213 @@ Return a JSON object with these fields:
         }
       },
     },
+    // --- Marketing Posts CRUD ---
+    {
+      path: '/marketing/posts',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { agency_id, platform, content, title, hashtags, cta, status, scheduled_at, post_type, media_url, ai_generated } = body
+          
+          if (!agency_id || !platform || !content) {
+            return Response.json({ success: false, error: 'agency_id, platform, and content are required' }, { status: 400 })
+          }
+          
+          const post = await req.payload.create({
+            collection: 'marketing-posts',
+            data: {
+              agency_id: Number(agency_id),
+              platform: platform || 'facebook',
+              title: title || '',
+              content,
+              hashtags: hashtags || '',
+              cta: cta || '',
+              status: status || 'draft',
+              scheduled_at: scheduled_at || '',
+              post_type: post_type || 'text',
+              media_url: media_url || '',
+              ai_generated: ai_generated || false,
+              engagement_likes: 0,
+              engagement_comments: 0,
+              engagement_shares: 0,
+            },
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, post })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/marketing/posts',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const agency_id = url.searchParams.get('agency_id')
+          const status = url.searchParams.get('status')
+          const platform = url.searchParams.get('platform')
+          const limit = parseInt(url.searchParams.get('limit') || '50')
+          
+          if (!agency_id) {
+            return Response.json({ success: false, error: 'agency_id is required' }, { status: 400 })
+          }
+          
+          const where: any = { agency_id: { equals: Number(agency_id) } }
+          if (status) where.status = { equals: status }
+          if (platform) where.platform = { equals: platform }
+          
+          const posts = await req.payload.find({
+            collection: 'marketing-posts',
+            where,
+            limit,
+            sort: '-createdAt',
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, posts: posts.docs, totalDocs: posts.totalDocs })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/marketing/posts',
+      method: 'patch' as any,
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { id, ...updates } = body
+          
+          if (!id) {
+            return Response.json({ success: false, error: 'id is required' }, { status: 400 })
+          }
+          
+          const post = await req.payload.update({
+            collection: 'marketing-posts',
+            id,
+            data: updates,
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, post })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/marketing/posts',
+      method: 'delete' as any,
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          
+          if (!id) {
+            return Response.json({ success: false, error: 'id is required' }, { status: 400 })
+          }
+          
+          await req.payload.delete({
+            collection: 'marketing-posts',
+            id,
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, message: 'Post deleted' })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // --- Social Account / Platform Connection ---
+    {
+      path: '/marketing/connect-platform',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { agency_id, platform, account_name, account_id, access_token, token_expires_at } = body
+          
+          if (!agency_id || !platform) {
+            return Response.json({ success: false, error: 'agency_id and platform are required' }, { status: 400 })
+          }
+          
+          // Check if already connected
+          const existing = await req.payload.find({
+            collection: 'social-accounts',
+            where: {
+              and: [
+                { agency_id: { equals: Number(agency_id) } },
+                { platform: { equals: platform } },
+              ]
+            },
+            overrideAccess: true,
+          })
+          
+          if (existing.docs.length > 0) {
+            // Update existing
+            const updated = await req.payload.update({
+              collection: 'social-accounts',
+              id: existing.docs[0].id,
+              data: {
+                account_name: account_name || '',
+                account_id: account_id || '',
+                access_token: access_token || '',
+                token_expires_at: token_expires_at || '',
+                is_connected: true,
+              },
+              overrideAccess: true,
+            })
+            return Response.json({ success: true, account: updated })
+          }
+          
+          const account = await req.payload.create({
+            collection: 'social-accounts',
+            data: {
+              agency_id: Number(agency_id),
+              platform,
+              account_name: account_name || '',
+              account_id: account_id || '',
+              access_token: access_token || '',
+              token_expires_at: token_expires_at || '',
+              is_connected: true,
+            },
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, account })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/marketing/platforms',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const agency_id = url.searchParams.get('agency_id')
+          
+          if (!agency_id) {
+            return Response.json({ success: false, error: 'agency_id is required' }, { status: 400 })
+          }
+          
+          const accounts = await req.payload.find({
+            collection: 'social-accounts',
+            where: { agency_id: { equals: Number(agency_id) } },
+            overrideAccess: true,
+          })
+          
+          return Response.json({ success: true, platforms: accounts.docs })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
   ],
 })
