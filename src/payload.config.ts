@@ -1554,20 +1554,27 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { platform, contentType, agencyId, customPrompt } = body
+          const { platform, contentType, agencyId, customPrompt, agencyName: directName, location } = body
 
           // Get agency info for personalization
-          let agencyName = 'Your Home Care Agency'
+          let agencyName = directName || 'Your Home Care Agency'
           let agencyCity = ''
           let agencyState = ''
-          try {
-            const agency = await req.payload.findByID({ collection: 'agencies', id: agencyId, depth: 0, overrideAccess: true })
-            if (agency) {
-              agencyName = agency.name || agencyName
-              agencyCity = agency.addressCity || ''
-              agencyState = agency.addressState || ''
-            }
-          } catch (e) {}
+          if (location) {
+            const parts = location.split(',').map((s: string) => s.trim())
+            agencyCity = parts[0] || ''
+            agencyState = parts[1] || ''
+          }
+          if (agencyId && !directName) {
+            try {
+              const agency = await req.payload.findByID({ collection: 'agencies', id: agencyId, depth: 0, overrideAccess: true })
+              if (agency) {
+                agencyName = agency.name || agencyName
+                agencyCity = agencyCity || agency.addressCity || ''
+                agencyState = agencyState || agency.addressState || ''
+              }
+            } catch (e) {}
+          }
 
           const platformGuides = {
             facebook: 'Write for Facebook. Use engaging, conversational tone. 200-300 words. Include emojis sparingly.',
@@ -1630,7 +1637,10 @@ Return a JSON object with these fields:
               }),
             })
 
-            const aiData = await aiResponse.json()
+            const aiData = await aiResponse.json() as any
+            if (aiData.error) {
+              return Response.json({ success: false, error: aiData.error.message || 'OpenAI API error', code: aiData.error.code })
+            }
             const aiText = aiData.choices?.[0]?.message?.content || ''
 
             // Try to parse JSON from response
