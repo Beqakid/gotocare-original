@@ -899,7 +899,7 @@ export default buildConfig({
             })
             caregiver = results.docs[0] || null
           } else {
-            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId, depth: 1 })
+            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId, depth: 1, overrideAccess: true })
           }
           if (!caregiver) {
             return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404 })
@@ -947,7 +947,7 @@ export default buildConfig({
           }
           let caregiver = null
           if (caregiverId) {
-            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId })
+            caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId, overrideAccess: true })
           } else if (token) {
             const results = await req.payload.find({
               collection: 'caregivers',
@@ -1077,6 +1077,7 @@ export default buildConfig({
             collection: 'caregivers',
             id: data.caregiverId,
             data: updateData,
+            overrideAccess: true,
           })
           return Response.json({ success: true, action: data.action, caregiverId: data.caregiverId })
         } catch (error) {
