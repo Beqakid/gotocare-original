@@ -38,6 +38,11 @@ export const Clients: CollectionConfig = {
       type: 'text',
     },
     {
+      name: 'accessCode',
+      type: 'text',
+      admin: { description: '6-digit access code for client portal login' },
+    },
+    {
       name: 'addressStreet',
       type: 'text',
     },
