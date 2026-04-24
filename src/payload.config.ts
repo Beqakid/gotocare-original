@@ -1085,5 +1085,268 @@ export default buildConfig({
         }
       },
     },
+    // ====== CLIENT PORTAL ENDPOINTS ======
+    {
+      path: '/client-login',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          if (!data.email || !data.accessCode) {
+            return Response.json({ error: 'Email and access code are required' }, { status: 400 })
+          }
+          const clients = await req.payload.find({
+            collection: 'clients',
+            where: {
+              email: { equals: data.email },
+              accessCode: { equals: data.accessCode },
+            },
+            limit: 1,
+            depth: 1,
+            overrideAccess: true,
+          })
+          if (clients.docs.length === 0) {
+            return Response.json({ error: 'Invalid email or access code' }, { status: 401 })
+          }
+          const client = clients.docs[0]
+          if (client.status === 'inactive') {
+            return Response.json({ error: 'Account is inactive. Contact your care agency.' }, { status: 403 })
+          }
+          const agencyName = client.agency && typeof client.agency === 'object' ? client.agency.name : 'Your Care Agency'
+          return Response.json({
+            success: true,
+            client: {
+              id: client.id,
+              firstName: client.firstName,
+              lastName: client.lastName,
+              email: client.email,
+              phone: client.phone,
+              agency: typeof client.agency === 'object' ? client.agency.id : client.agency,
+              location: typeof client.location === 'object' ? client.location?.id : client.location,
+              address: [client.addressStreet, client.addressCity, client.addressState, client.addressZip].filter(Boolean).join(', '),
+              careNeeds: client.careNeeds,
+              emergencyContact: client.emergencyContactName,
+              emergencyPhone: client.emergencyContactPhone,
+              preferredLanguage: client.preferredLanguage,
+            },
+            agencyName: agencyName,
+          })
+        } catch (error) {
+          return Response.json({ error: 'Login failed' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-portal/schedule',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientId = url.searchParams.get('clientId')
+          if (!clientId) {
+            return Response.json({ error: 'clientId is required' }, { status: 400 })
+          }
+          const shifts = await req.payload.find({
+            collection: 'shifts',
+            where: { client: { equals: clientId } },
+            sort: '-date',
+            limit: 100,
+            depth: 1,
+            overrideAccess: true,
+          })
+          const mapped = shifts.docs.map((s) => ({
+            id: s.id,
+            date: s.date ? s.date.split('T')[0] : '',
+            startTime: s.startTime || '',
+            endTime: s.endTime || '',
+            status: s.status || 'scheduled',
+            shiftType: s.shiftType || s.serviceType || '',
+            notes: s.notes || '',
+            caregiver: s.caregiver && typeof s.caregiver === 'object' ? {
+              id: s.caregiver.id,
+              firstName: s.caregiver.firstName,
+              lastName: s.caregiver.lastName,
+              phone: s.caregiver.phone,
+              photo: s.caregiver.photoUrl,
+            } : null,
+          }))
+          return Response.json({ success: true, shifts: mapped })
+        } catch (error) {
+          return Response.json({ error: 'Failed to load schedule' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-portal/caregivers',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientId = url.searchParams.get('clientId')
+          if (!clientId) {
+            return Response.json({ error: 'clientId is required' }, { status: 400 })
+          }
+          // Find all caregivers who have had shifts with this client
+          const shifts = await req.payload.find({
+            collection: 'shifts',
+            where: { client: { equals: clientId } },
+            limit: 500,
+            depth: 1,
+            overrideAccess: true,
+          })
+          const seen = new Set()
+          const caregivers = []
+          for (const s of shifts.docs) {
+            const cg = s.caregiver && typeof s.caregiver === 'object' ? s.caregiver : null
+            if (cg && !seen.has(cg.id)) {
+              seen.add(cg.id)
+              caregivers.push({
+                id: cg.id,
+                firstName: cg.firstName,
+                lastName: cg.lastName,
+                email: cg.email,
+                phone: cg.phone,
+                photo: cg.photoUrl,
+                skills: typeof cg.skills === 'string' ? cg.skills : (Array.isArray(cg.skills) ? cg.skills.join(', ') : ''),
+                specializations: cg.specializations || cg.certifications || '',
+                languages: cg.languages || '',
+                experienceYears: cg.experienceYears,
+                bio: cg.bio || '',
+              })
+            }
+          }
+          // Also check matched caregiver on the client record
+          const client = await req.payload.findByID({ collection: 'clients', id: clientId, depth: 1, overrideAccess: true })
+          if (client.matchedCaregiver && typeof client.matchedCaregiver === 'object' && !seen.has(client.matchedCaregiver.id)) {
+            const mc = client.matchedCaregiver
+            caregivers.unshift({
+              id: mc.id,
+              firstName: mc.firstName,
+              lastName: mc.lastName,
+              email: mc.email,
+              phone: mc.phone,
+              photo: mc.photoUrl,
+              skills: typeof mc.skills === 'string' ? mc.skills : (Array.isArray(mc.skills) ? mc.skills.join(', ') : ''),
+              specializations: mc.specializations || mc.certifications || '',
+              languages: mc.languages || '',
+              experienceYears: mc.experienceYears,
+              bio: mc.bio || '',
+            })
+          }
+          return Response.json({ success: true, caregivers: caregivers })
+        } catch (error) {
+          return Response.json({ error: 'Failed to load caregivers' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-portal/invoices',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientId = url.searchParams.get('clientId')
+          if (!clientId) {
+            return Response.json({ error: 'clientId is required' }, { status: 400 })
+          }
+          const invoices = await req.payload.find({
+            collection: 'invoices',
+            where: { client: { equals: clientId } },
+            sort: '-issuedDate',
+            limit: 100,
+            depth: 0,
+            overrideAccess: true,
+          })
+          const mapped = invoices.docs.map((inv) => ({
+            id: inv.id,
+            invoiceNumber: inv.invoiceNumber || 'INV-' + inv.id,
+            date: inv.issuedDate ? inv.issuedDate.split('T')[0] : '',
+            dueDate: inv.dueDate ? inv.dueDate.split('T')[0] : '',
+            totalAmount: inv.totalAmount || inv.amount || 0,
+            status: inv.status || 'draft',
+            lineItems: inv.lineItems || '',
+            pdfUrl: inv.pdfUrl || '',
+          }))
+          return Response.json({ success: true, invoices: mapped })
+        } catch (error) {
+          return Response.json({ error: 'Failed to load invoices' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-portal/profile',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientId = url.searchParams.get('clientId')
+          if (!clientId) {
+            return Response.json({ error: 'clientId is required' }, { status: 400 })
+          }
+          const client = await req.payload.findByID({ collection: 'clients', id: clientId, depth: 1, overrideAccess: true })
+          const agencyName = client.agency && typeof client.agency === 'object' ? client.agency.name : ''
+          return Response.json({
+            success: true,
+            profile: {
+              id: client.id,
+              firstName: client.firstName,
+              lastName: client.lastName,
+              email: client.email,
+              phone: client.phone,
+              addressStreet: client.addressStreet,
+              addressCity: client.addressCity,
+              addressState: client.addressState,
+              addressZip: client.addressZip,
+              emergencyContactName: client.emergencyContactName,
+              emergencyContactPhone: client.emergencyContactPhone,
+              emergencyContactRelationship: client.emergencyContactRelationship,
+              preferredLanguage: client.preferredLanguage,
+              careNeeds: client.careNeeds,
+              preferredSchedule: client.preferredSchedule,
+              agencyName: agencyName,
+            },
+          })
+        } catch (error) {
+          return Response.json({ error: 'Failed to load profile' }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-portal/profile',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientId = url.searchParams.get('clientId')
+          if (!clientId) {
+            return Response.json({ error: 'clientId is required' }, { status: 400 })
+          }
+          const data = await req.json()
+          const updateData = {}
+          if (data.phone !== undefined) updateData.phone = data.phone
+          if (data.address !== undefined) updateData.addressStreet = data.address
+          if (data.addressStreet !== undefined) updateData.addressStreet = data.addressStreet
+          if (data.addressCity !== undefined) updateData.addressCity = data.addressCity
+          if (data.addressState !== undefined) updateData.addressState = data.addressState
+          if (data.addressZip !== undefined) updateData.addressZip = data.addressZip
+          if (data.emergencyContact !== undefined) updateData.emergencyContactName = data.emergencyContact
+          if (data.emergencyContactName !== undefined) updateData.emergencyContactName = data.emergencyContactName
+          if (data.emergencyPhone !== undefined) updateData.emergencyContactPhone = data.emergencyPhone
+          if (data.emergencyContactPhone !== undefined) updateData.emergencyContactPhone = data.emergencyContactPhone
+          if (data.preferredLanguage !== undefined) updateData.preferredLanguage = data.preferredLanguage
+          if (data.careNeeds !== undefined) updateData.careNeeds = data.careNeeds
+          if (data.preferredSchedule !== undefined) updateData.preferredSchedule = data.preferredSchedule
+          await req.payload.update({
+            collection: 'clients',
+            id: clientId,
+            data: updateData,
+            overrideAccess: true,
+          })
+          return Response.json({ success: true, message: 'Profile updated' })
+        } catch (error) {
+          return Response.json({ error: 'Failed to update profile' }, { status: 500 })
+        }
+      },
+    },
   ],
 })
