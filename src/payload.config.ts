@@ -19,6 +19,8 @@ import { Leads } from './collections/Leads'
 import { Agencies } from './collections/Agencies'
 import { Locations } from './collections/Locations'
 import { CaregiverDocuments } from './collections/CaregiverDocuments'
+import { MarketingPosts } from './collections/MarketingPosts'
+import { SocialAccounts } from './collections/SocialAccounts'
 
 const filename = fileURLToPath(import.meta.url)
 const dirname = path.dirname(filename)
@@ -49,7 +51,7 @@ export default buildConfig({
       baseDir: path.resolve(dirname),
     },
   },
-  collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads, CaregiverDocuments],
+  collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads, CaregiverDocuments, MarketingPosts, SocialAccounts],
   secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
@@ -1542,6 +1544,131 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
           })
         } catch (error) {
           return Response.json({ error: 'Failed to check payment status' }, { status: 500 })
+        }
+      },
+    },
+    // ====== AI MARKETING CONTENT GENERATOR ======
+    {
+      path: '/marketing/generate-content',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { platform, contentType, agencyId, customPrompt } = body
+
+          // Get agency info for personalization
+          let agencyName = 'Your Home Care Agency'
+          let agencyCity = ''
+          let agencyState = ''
+          try {
+            const agency = await req.payload.findByID({ collection: 'agencies', id: agencyId, depth: 0, overrideAccess: true })
+            if (agency) {
+              agencyName = agency.name || agencyName
+              agencyCity = agency.addressCity || ''
+              agencyState = agency.addressState || ''
+            }
+          } catch (e) {}
+
+          const platformGuides = {
+            facebook: 'Write for Facebook. Use engaging, conversational tone. 200-300 words. Include emojis sparingly.',
+            instagram: 'Write for Instagram. Visual-first, use line breaks for readability. 150-200 words. Heavy emoji usage. End with CTA.',
+            tiktok: 'Write for TikTok caption. Short, punchy, trendy. 100-150 words. Use trending language. Include hooks.',
+            twitter: 'Write for X/Twitter. Concise, impactful. Under 280 characters for main message. Thread-friendly.',
+            linkedin: 'Write for LinkedIn. Professional but warm tone. 200-300 words. Include industry insights.',
+            google_business: 'Write for Google Business post. Local-focused. 150-200 words. Include location references.',
+          }
+
+          const contentTypeGuides = {
+            care_tip: 'Share a practical health/wellness tip for families caring for elderly loved ones.',
+            hiring: 'Create an exciting job posting for caregivers. Highlight benefits, growth, and purpose.',
+            testimonial: 'Write a heartfelt (anonymized) client testimonial story. Make it emotional and authentic.',
+            spotlight: 'Feature a caregiver team member. Celebrate their dedication and impact.',
+            seasonal: 'Create seasonal/holiday content relevant to home care and senior wellness.',
+            educational: 'Share educational content about home care industry, Medicare, insurance, or care planning.',
+            behind_scenes: 'Show a day-in-the-life of a caregiver. Make it relatable and inspiring.',
+            community: 'Highlight community involvement, local events, or volunteer work.',
+          }
+
+          const systemPrompt = `You are a social media marketing expert for home care agencies. You create engaging, HIPAA-compliant content that builds trust with families seeking care for their loved ones.
+
+Agency: ${agencyName}${agencyCity ? `, based in ${agencyCity}, ${agencyState}` : ''}
+
+Rules:
+- NEVER use real patient/client names or identifiable information
+- Always be warm, compassionate, and professional
+- Include a clear call-to-action
+- Make content shareable and engaging
+- Use the agency's location for local relevance when possible
+
+${platformGuides[platform] || platformGuides.facebook}
+${contentTypeGuides[contentType] || contentTypeGuides.care_tip}
+
+Return a JSON object with these fields:
+{ "title": "short post title", "content": "the full post content", "hashtags": "relevant hashtags", "cta": "call to action text" }`
+
+          const userPrompt = customPrompt || `Generate a ${contentType.replace('_', ' ')} post for ${platform} for ${agencyName}.`
+
+          // Try OpenAI if key is available
+          const { env } = await getCloudflareContext({ async: true })
+          const openaiKey = env.OPENAI_API_KEY
+
+          if (openaiKey) {
+            const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${openaiKey}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                model: 'gpt-4o-mini',
+                messages: [
+                  { role: 'system', content: systemPrompt },
+                  { role: 'user', content: userPrompt },
+                ],
+                temperature: 0.8,
+                max_tokens: 1000,
+              }),
+            })
+
+            const aiData = await aiResponse.json()
+            const aiText = aiData.choices?.[0]?.message?.content || ''
+
+            // Try to parse JSON from response
+            try {
+              const jsonMatch = aiText.match(/\{[\s\S]*\}/)
+              if (jsonMatch) {
+                const parsed = JSON.parse(jsonMatch[0])
+                return Response.json({
+                  success: true,
+                  title: parsed.title || 'Untitled Post',
+                  content: parsed.content || aiText,
+                  hashtags: parsed.hashtags || '',
+                  cta: parsed.cta || '',
+                  ai_generated: true,
+                  model: 'gpt-4o-mini',
+                })
+              }
+            } catch (e) {}
+
+            return Response.json({
+              success: true,
+              title: 'AI Generated Post',
+              content: aiText,
+              hashtags: '',
+              cta: '',
+              ai_generated: true,
+              model: 'gpt-4o-mini',
+            })
+          }
+
+          // Fallback: return template-based content
+          return Response.json({
+            success: false,
+            error: 'OPENAI_API_KEY not configured. Using template content.',
+            useTemplate: true,
+          })
+        } catch (error) {
+          return Response.json({ error: 'Failed to generate content' }, { status: 500 })
         }
       },
     },

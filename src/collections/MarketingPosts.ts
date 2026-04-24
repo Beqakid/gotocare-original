@@ -1,0 +1,55 @@
+// @ts-nocheck
+import type { CollectionConfig } from 'payload';
+
+export const MarketingPosts: CollectionConfig = {
+  slug: 'marketing-posts',
+  access: {
+    read: () => true,
+    create: () => true,
+    update: () => true,
+    delete: () => true,
+  },
+  fields: [
+    { name: 'agency_id', type: 'number', required: true },
+    { name: 'location_id', type: 'number' },
+    { name: 'title', type: 'text', required: true },
+    { name: 'content', type: 'textarea', required: true },
+    { name: 'platform', type: 'select', required: true, defaultValue: 'facebook', options: [
+      { label: 'Facebook', value: 'facebook' },
+      { label: 'Instagram', value: 'instagram' },
+      { label: 'TikTok', value: 'tiktok' },
+      { label: 'X / Twitter', value: 'twitter' },
+      { label: 'LinkedIn', value: 'linkedin' },
+      { label: 'Google Business', value: 'google_business' },
+    ]},
+    { name: 'content_type', type: 'select', required: true, defaultValue: 'care_tip', options: [
+      { label: 'Care Tip', value: 'care_tip' },
+      { label: 'Hiring Post', value: 'hiring' },
+      { label: 'Testimonial', value: 'testimonial' },
+      { label: 'Caregiver Spotlight', value: 'spotlight' },
+      { label: 'Seasonal/Holiday', value: 'seasonal' },
+      { label: 'Educational', value: 'educational' },
+      { label: 'Behind the Scenes', value: 'behind_scenes' },
+      { label: 'Community', value: 'community' },
+    ]},
+    { name: 'hashtags', type: 'text' },
+    { name: 'cta', type: 'text' },
+    { name: 'media_url', type: 'text' },
+    { name: 'scheduled_date', type: 'text' },
+    { name: 'posted_date', type: 'text' },
+    { name: 'status', type: 'select', required: true, defaultValue: 'draft', options: [
+      { label: 'Draft', value: 'draft' },
+      { label: 'Scheduled', value: 'scheduled' },
+      { label: 'Posted', value: 'posted' },
+      { label: 'Failed', value: 'failed' },
+    ]},
+    { name: 'engagement_likes', type: 'number', defaultValue: 0 },
+    { name: 'engagement_comments', type: 'number', defaultValue: 0 },
+    { name: 'engagement_shares', type: 'number', defaultValue: 0 },
+    { name: 'engagement_clicks', type: 'number', defaultValue: 0 },
+    { name: 'lead_source_count', type: 'number', defaultValue: 0 },
+    { name: 'ai_generated', type: 'number', defaultValue: 0 },
+    { name: 'ai_prompt', type: 'textarea' },
+    { name: 'notes', type: 'textarea' },
+  ],
+};
