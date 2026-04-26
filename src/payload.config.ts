@@ -1890,5 +1890,314 @@ Return a JSON object with these fields:
         }
       },
     },
+    // MARKETPLACE ENDPOINTS FOR CLIENT PORTAL
+    {
+      path: '/search-caregivers',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const location = url.searchParams.get('location') || ''
+          const specialty = url.searchParams.get('specialty') || ''
+          const limit = parseInt(url.searchParams.get('limit') || '20')
+          const page = parseInt(url.searchParams.get('page') || '1')
+
+          const caregivers = await req.payload.find({
+            collection: 'caregivers',
+            limit: 1000,
+            where: { status: { equals: 'active' } },
+          })
+
+          let filtered = caregivers.docs
+          
+          if (location) {
+            filtered = filtered.filter((c) => {
+              const caregiver_location = c.location
+              if (typeof caregiver_location === 'object') {
+                return caregiver_location.city?.toLowerCase().includes(location.toLowerCase()) ||
+                       caregiver_location.state?.toLowerCase().includes(location.toLowerCase())
+              }
+              return false
+            })
+          }
+
+          if (specialty) {
+            filtered = filtered.filter((c) => {
+              if (!c.skills) return false
+              return c.skills.some((s) => {
+                const skill = typeof s === 'object' ? s.name : s
+                return skill?.toLowerCase().includes(specialty.toLowerCase())
+              })
+            })
+          }
+
+          const results = filtered.slice((page - 1) * limit, page * limit).map((c) => ({
+            id: c.id,
+            name: `${c.firstName} ${c.lastName}`,
+            specialty: c.specializations?.[0] || 'General Care',
+            hourlyRate: c.hourlyRate || 25,
+            experience: c.yearsOfExperience || 1,
+            rating: c.averageRating || 5,
+            reviews: c.totalReviews || 0,
+            skills: (c.skills || []).map((s) => typeof s === 'object' ? s.name : s),
+            bio: c.bio || '',
+            location: typeof c.location === 'object' ? {
+              city: c.location.city,
+              state: c.location.state,
+            } : null,
+            available: true,
+          }))
+
+          return Response.json({
+            success: true,
+            data: results,
+            pagination: {
+              page,
+              limit,
+              total: filtered.length,
+              pages: Math.ceil(filtered.length / limit),
+            },
+          })
+        } catch (error) {
+          console.error('Search caregivers error:', error)
+          return Response.json(
+            { success: false, error: 'Failed to search caregivers' },
+            { status: 500 }
+          )
+        }
+      },
+    },
+    {
+      path: '/submit-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          const { caregiverId, clientName, clientEmail, clientPhone, date, startTime, duration, specialRequests } = data
+
+          if (!caregiverId || !clientEmail || !date || !startTime || !duration) {
+            return Response.json(
+              { success: false, error: 'Missing required fields' },
+              { status: 400 }
+            )
+          }
+
+          let client = await req.payload.find({
+            collection: 'clients',
+            where: { email: { equals: clientEmail } },
+          })
+
+          let clientId
+          if (client.docs.length === 0) {
+            const newClient = await req.payload.create({
+              collection: 'clients',
+              data: {
+                firstName: clientName.split(' ')[0] || 'Client',
+                lastName: clientName.split(' ').slice(1).join(' ') || '',
+                email: clientEmail,
+                phone: clientPhone,
+                status: 'active',
+                leadSource: 'marketplace',
+              },
+            })
+            clientId = newClient.id
+          } else {
+            clientId = client.docs[0].id
+          }
+
+          const booking = await req.payload.create({
+            collection: 'shifts',
+            data: {
+              caregiver: caregiverId,
+              client: clientId,
+              date: new Date(date).toISOString(),
+              startTime,
+              duration: parseInt(duration),
+              status: 'pending',
+              notes: specialRequests || '',
+              type: 'marketplace_booking',
+              hourlyRate: 25,
+            },
+          })
+
+          return Response.json({
+            success: true,
+            bookingId: booking.id,
+            message: 'Booking created. Proceed to payment.',
+          })
+        } catch (error) {
+          console.error('Submit booking error:', error)
+          return Response.json(
+            { success: false, error: 'Failed to create booking' },
+            { status: 500 }
+          )
+        }
+      },
+    },
+    {
+      path: '/create-marketplace-checkout',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const Stripe = await import('stripe')
+          const stripe = new (Stripe.default || Stripe)(process.env.STRIPE_SECRET_KEY)
+
+          const data = await req.json()
+          const { bookingId, caregiverHourlyRate, duration, clientEmail } = data
+
+          if (!bookingId || !caregiverHourlyRate || !duration) {
+            return Response.json(
+              { success: false, error: 'Missing required fields' },
+              { status: 400 }
+            )
+          }
+
+          const subtotal = caregiverHourlyRate * duration
+          const serviceFee = Math.round(subtotal * 0.1)
+          const total = (subtotal * 100) + serviceFee
+
+          const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [
+              {
+                price_data: {
+                  currency: 'usd',
+                  product_data: {
+                    name: `Caregiver Booking - ${duration} hours`,
+                  },
+                  unit_amount: subtotal * 100,
+                },
+                quantity: 1,
+              },
+              {
+                price_data: {
+                  currency: 'usd',
+                  product_data: {
+                    name: 'Service Fee',
+                  },
+                  unit_amount: serviceFee,
+                },
+                quantity: 1,
+              },
+            ],
+            mode: 'payment',
+            success_url: `https://gotocare-client-portal.pages.dev/?success=true&bookingId=${bookingId}`,
+            cancel_url: `https://gotocare-client-portal.pages.dev/?canceled=true`,
+            customer_email: clientEmail,
+            metadata: { bookingId },
+          })
+
+          return Response.json({
+            success: true,
+            checkoutUrl: session.url,
+            sessionId: session.id,
+          })
+        } catch (error) {
+          console.error('Create checkout error:', error)
+          return Response.json(
+            { success: false, error: 'Failed to create checkout' },
+            { status: 500 }
+          )
+        }
+      },
+    },
+    {
+      path: '/client-bookings',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const clientEmail = url.searchParams.get('email')
+
+          if (!clientEmail) {
+            return Response.json(
+              { success: false, error: 'email parameter is required' },
+              { status: 400 }
+            )
+          }
+
+          const clientResult = await req.payload.find({
+            collection: 'clients',
+            where: { email: { equals: clientEmail } },
+          })
+
+          if (clientResult.docs.length === 0) {
+            return Response.json({
+              success: true,
+              data: [],
+              message: 'No client found',
+            })
+          }
+
+          const clientId = clientResult.docs[0].id
+
+          const bookings = await req.payload.find({
+            collection: 'shifts',
+            where: { client: { equals: clientId } },
+            limit: 100,
+          })
+
+          const results = bookings.docs.map((booking) => ({
+            id: booking.id,
+            caregiverId: booking.caregiver,
+            date: booking.date,
+            startTime: booking.startTime,
+            duration: booking.duration,
+            status: booking.status,
+            notes: booking.notes,
+            total: (booking.hourlyRate || 25) * booking.duration * 1.1,
+          }))
+
+          return Response.json({
+            success: true,
+            data: results,
+          })
+        } catch (error) {
+          console.error('Get bookings error:', error)
+          return Response.json(
+            { success: false, error: 'Failed to fetch bookings' },
+            { status: 500 }
+          )
+        }
+      },
+    },
+    {
+      path: '/confirm-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const data = await req.json()
+          const { bookingId, stripeSessionId } = data
+
+          if (!bookingId) {
+            return Response.json(
+              { success: false, error: 'bookingId is required' },
+              { status: 400 }
+            )
+          }
+
+          const updatedBooking = await req.payload.update({
+            collection: 'shifts',
+            id: bookingId,
+            data: {
+              status: 'confirmed',
+              stripeSessionId,
+            },
+          })
+
+          return Response.json({
+            success: true,
+            booking: updatedBooking,
+            message: 'Booking confirmed',
+          })
+        } catch (error) {
+          console.error('Confirm booking error:', error)
+          return Response.json(
+            { success: false, error: 'Failed to confirm booking' },
+            { status: 500 }
+          )
+        }
+      },
+    },
   ],
 })
