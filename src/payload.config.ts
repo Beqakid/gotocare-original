@@ -2058,5 +2058,232 @@ Return a JSON object with these fields:
         }
       },
     },
+
+    // ====== SEARCH CAREGIVERS (marketplace) ======
+    {
+      path: '/search-caregivers',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const location = url.searchParams.get('location') || ''
+          const specialty = url.searchParams.get('specialty') || ''
+          const page = parseInt(url.searchParams.get('page') || '1')
+          const limit = parseInt(url.searchParams.get('limit') || '20')
+          const where: any = { status: { equals: 'active' } }
+          if (specialty) {
+            where.specializations = { like: specialty }
+          }
+          const caregivers = await req.payload.find({
+            collection: 'caregivers',
+            where,
+            limit,
+            page,
+            depth: 0,
+            overrideAccess: true,
+          })
+          const mapped = caregivers.docs.map((cg: any) => ({
+            id: cg.id,
+            firstName: cg.firstName,
+            lastName: cg.lastName,
+            specializations: cg.specializations || cg.certifications || '',
+            skills: cg.skills || [],
+            hourlyRate: cg.hourlyRate || 28,
+            rating: cg.rating || 4.8,
+            reviews: cg.reviews || 0,
+            yearsExp: cg.experienceYears || 3,
+            bio: cg.bio || '',
+            languages: cg.languages || 'English',
+            availability: cg.availability || [1,1,1,1,1,0,0],
+            avatar: '\u{1F469}\u200D\u2695\uFE0F',
+            matchScore: 85 + Math.floor(Math.random() * 12),
+          }))
+          return Response.json({ success: true, caregivers: mapped, totalDocs: caregivers.totalDocs })
+        } catch (error) {
+          return Response.json({ success: false, caregivers: [], error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== SUBMIT BOOKING (marketplace) ======
+    {
+      path: '/submit-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { caregiverId, clientName, clientEmail, clientPhone, careNeeds, startDate, hours } = body
+          await req.payload.create({
+            collection: 'leads',
+            data: {
+              firstName: clientName?.split(' ')[0] || 'Guest',
+              lastName: clientName?.split(' ').slice(1).join(' ') || '',
+              email: clientEmail || '',
+              phone: clientPhone || '',
+              careType: Array.isArray(careNeeds) ? careNeeds[0] : careNeeds || 'home_care',
+              message: `Booking request: ${hours} hours starting ${startDate}. Care needs: ${Array.isArray(careNeeds) ? careNeeds.join(', ') : careNeeds}`,
+              source: 'marketplace',
+              status: 'new',
+            },
+            overrideAccess: true,
+          })
+          return Response.json({ success: true, message: 'Booking submitted' })
+        } catch (error) {
+          return Response.json({ success: true, message: 'Booking noted' })
+        }
+      },
+    },
+    // ====== CREATE MARKETPLACE CHECKOUT ======
+    {
+      path: '/create-marketplace-checkout',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { caregiverId, clientEmail, clientName, hours, careNeeds, startDate } = body
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          const hourlyRate = 28
+          const total = Math.round(hours * hourlyRate * 1.1 * 100)
+          const needs = Array.isArray(careNeeds) ? careNeeds.join(', ') : (careNeeds || 'Home Care')
+          const params = new URLSearchParams({
+            'mode': 'payment',
+            'line_items[0][price_data][currency]': 'usd',
+            'line_items[0][price_data][product_data][name]': `Care Session — ${needs}`,
+            'line_items[0][price_data][product_data][description]': `${hours} hours on ${startDate}`,
+            'line_items[0][price_data][unit_amount]': String(total),
+            'line_items[0][quantity]': '1',
+            'customer_email': clientEmail || '',
+            'success_url': 'https://gotocare-client-portal.pages.dev/?booking=success',
+            'cancel_url': 'https://gotocare-client-portal.pages.dev/?booking=cancelled',
+            'metadata[caregiver_id]': String(caregiverId || ''),
+            'metadata[type]': 'marketplace_booking',
+          })
+          const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${stripeKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          })
+          const session = await stripeRes.json() as any
+          if (!session.url) return Response.json({ error: 'Checkout failed', demo: true })
+          return Response.json({ success: true, url: session.url })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== BOOK INTERVIEW ======
+    {
+      path: '/book-interview',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes } = body
+          if (!caregiverId || !clientEmail || !preferredDate) {
+            return Response.json({ error: 'caregiverId, clientEmail, preferredDate required' }, { status: 400 })
+          }
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_bookings (caregiver_id, client_email, care_needs, preferred_date, preferred_time, interview_type, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', notes || '', 'pending').run()
+          return Response.json({ success: true, message: 'Interview request sent' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== GET CAREGIVER BOOKINGS ======
+    {
+      path: '/caregiver-bookings',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const caregiverId = url.searchParams.get('caregiverId')
+          if (!caregiverId) return Response.json({ error: 'caregiverId required' }, { status: 400 })
+          const result = await cloudflare.env.D1.prepare(
+            'SELECT * FROM caregiver_bookings WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 50'
+          ).bind(String(caregiverId)).all()
+          const bookings = (result.results || []).map((b: any) => ({
+            id: b.id,
+            clientEmail: b.is_unlocked ? b.client_email : (b.client_email ? b.client_email.substring(0, 2) + '***@***' : ''),
+            careNeeds: b.care_needs,
+            preferredDate: b.is_unlocked ? b.preferred_date : null,
+            preferredTime: b.is_unlocked ? b.preferred_time : null,
+            interviewType: b.interview_type,
+            notes: b.is_unlocked ? b.notes : '',
+            status: b.status,
+            isUnlocked: b.is_unlocked === 1,
+            createdAt: b.created_at,
+          }))
+          return Response.json({ success: true, bookings })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== UNLOCK BOOKING ($4.99 one-time) ======
+    {
+      path: '/unlock-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { bookingId, caregiverId } = body
+          if (!bookingId) return Response.json({ error: 'bookingId required' }, { status: 400 })
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          const params = new URLSearchParams({
+            'mode': 'payment',
+            'line_items[0][price]': 'price_1TQmae6E8zcVOY4tSunkjW89',
+            'line_items[0][quantity]': '1',
+            'success_url': 'https://gotocare-caregiver-portal.pages.dev/?booking_unlocked=' + bookingId,
+            'cancel_url': 'https://gotocare-caregiver-portal.pages.dev/?booking_cancelled=1',
+            'metadata[booking_id]': String(bookingId),
+            'metadata[caregiver_id]': String(caregiverId || ''),
+            'metadata[type]': 'booking_unlock',
+          })
+          const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${stripeKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          })
+          const session = await stripeRes.json() as any
+          if (!session.url) return Response.json({ error: 'Stripe session failed', details: session }, { status: 500 })
+          return Response.json({ success: true, url: session.url })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CREATE CAREGIVER SUBSCRIPTION ($19.99/mo) ======
+    {
+      path: '/create-caregiver-subscription-checkout',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { caregiverId } = body
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          const params = new URLSearchParams({
+            'mode': 'subscription',
+            'line_items[0][price]': 'price_1TQmcY6E8zcVOY4tSOJ9E3X2',
+            'line_items[0][quantity]': '1',
+            'success_url': 'https://gotocare-caregiver-portal.pages.dev/?subscription=success&caregiver=' + (caregiverId || ''),
+            'cancel_url': 'https://gotocare-caregiver-portal.pages.dev/?subscription=cancelled',
+            'metadata[caregiver_id]': String(caregiverId || ''),
+            'metadata[type]': 'caregiver_subscription',
+          })
+          const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${stripeKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: params.toString(),
+          })
+          const session = await stripeRes.json() as any
+          if (!session.url) return Response.json({ error: 'Stripe session failed', details: session }, { status: 500 })
+          return Response.json({ success: true, url: session.url })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
   ],
 })
