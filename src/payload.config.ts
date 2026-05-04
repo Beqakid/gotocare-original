@@ -1519,6 +1519,25 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
             }
             // Handle client subscription
             const subType = session.metadata?.type
+            // Handle booking unlock ($4.99 one-time)
+            if (subType === 'booking_unlock') {
+              const bookingId = session.metadata?.booking_id
+              if (bookingId) {
+                await cloudflare.env.D1.prepare(
+                  'UPDATE caregiver_bookings SET is_unlocked = 1 WHERE id = ?'
+                ).bind(Number(bookingId)).run()
+              }
+            }
+            // Handle caregiver unlimited subscription ($19.99/mo)
+            if (subType === 'caregiver_subscription') {
+              const cgId = session.metadata?.caregiver_id
+              if (cgId) {
+                // Unlock all pending bookings for this caregiver
+                await cloudflare.env.D1.prepare(
+                  'UPDATE caregiver_bookings SET is_unlocked = 1 WHERE caregiver_id = ?'
+                ).bind(String(cgId)).run()
+              }
+            }
             if (subType === 'client_subscription') {
               const clientEmail = session.metadata?.client_email || session.customer_email || ''
               const plan = session.metadata?.plan || 'essential'
@@ -2279,6 +2298,56 @@ Return a JSON object with these fields:
           const session = await stripeRes.json() as any
           if (!session.url) return Response.json({ error: 'Stripe session failed', details: session }, { status: 500 })
           return Response.json({ success: true, url: session.url })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== UPDATE BOOKING STATUS (caregiver accept/decline) ======
+    {
+      path: '/update-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { bookingId, status } = body
+          if (!bookingId || !['accepted', 'declined'].includes(status)) {
+            return Response.json({ error: 'bookingId and valid status (accepted/declined) required' }, { status: 400 })
+          }
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_bookings SET status = ? WHERE id = ?'
+          ).bind(status, Number(bookingId)).run()
+          return Response.json({ success: true, bookingId, status })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== MY BOOKINGS (client view their interview requests) ======
+    {
+      path: '/my-bookings',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const email = url.searchParams.get('email')
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+          const result = await cloudflare.env.D1.prepare(
+            'SELECT * FROM caregiver_bookings WHERE client_email = ? ORDER BY created_at DESC LIMIT 50'
+          ).bind(email.toLowerCase()).all()
+          const bookings = (result.results || []).map((b: any) => ({
+            id: b.id,
+            caregiverId: b.caregiver_id,
+            careNeeds: b.care_needs,
+            preferredDate: b.preferred_date,
+            preferredTime: b.preferred_time,
+            interviewType: b.interview_type,
+            notes: b.notes,
+            status: b.status,
+            createdAt: b.created_at,
+          }))
+          return Response.json({ success: true, bookings })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
