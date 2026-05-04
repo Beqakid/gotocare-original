@@ -2354,5 +2354,233 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ====== CAREGIVER SELF-REGISTRATION ======
+    {
+      path: '/caregiver-register',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { name, email, password } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+          if (!password) return Response.json({ error: 'password required' }, { status: 400 })
+
+          const existing = await cloudflare.env.D1.prepare(
+            'SELECT id FROM caregiver_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first()
+          if (existing) return Response.json({ error: 'Account already exists. Sign in instead.' }, { status: 409 })
+
+          const salt = crypto.randomUUID()
+          const enc = new TextEncoder()
+          const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + salt))
+          const passwordHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
+
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_accounts (email, name, password_hash, salt) VALUES (?, ?, ?, ?)'
+          ).bind(email.toLowerCase(), name || '', passwordHash, salt).run()
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, email, name, setup_complete FROM caregiver_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first()
+
+          const token = crypto.randomUUID() + '-' + crypto.randomUUID()
+          await cloudflare.env.D1.prepare(
+            "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
+          ).bind(token, account.id).run()
+
+          return Response.json({
+            success: true,
+            token,
+            account: { id: account.id, email: account.email, name: account.name, setupComplete: false },
+          })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CAREGIVER LOGIN ======
+    {
+      path: '/caregiver-login',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email, password } = body
+          if (!email || !password) return Response.json({ error: 'email and password required' }, { status: 400 })
+
+          const account = await cloudflare.env.D1.prepare(
+            "SELECT * FROM caregiver_accounts WHERE email = ? AND status = 'active'"
+          ).bind(email.toLowerCase()).first()
+          if (!account) return Response.json({ error: 'Invalid email or password' }, { status: 401 })
+
+          const enc = new TextEncoder()
+          const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + account.salt))
+          const passwordHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
+          if (passwordHash !== account.password_hash) return Response.json({ error: 'Invalid email or password' }, { status: 401 })
+
+          const token = crypto.randomUUID() + '-' + crypto.randomUUID()
+          await cloudflare.env.D1.prepare(
+            "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
+          ).bind(token, account.id).run()
+
+          return Response.json({
+            success: true,
+            token,
+            account: {
+              id: account.id,
+              email: account.email,
+              name: account.name,
+              zipCode: account.zip_code || '',
+              careTypes: account.care_types ? JSON.parse(account.care_types) : [],
+              phone: account.phone || '',
+              bio: account.bio || '',
+              photoUrl: account.photo_url || '',
+              setupComplete: account.setup_complete === 1 || account.setup_complete === true,
+            },
+          })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== GOOGLE OAUTH FOR CAREGIVERS ======
+    {
+      path: '/caregiver-auth/google',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { credential } = body
+          if (!credential) return Response.json({ error: 'Google credential required' }, { status: 400 })
+
+          const tokenRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${credential}`)
+          const tokenData = await tokenRes.json() as any
+          if (tokenData.error) return Response.json({ error: 'Invalid Google token' }, { status: 401 })
+
+          const googleSub = tokenData.sub
+          const email = tokenData.email?.toLowerCase()
+          const name = tokenData.name || ((tokenData.given_name || '') + ' ' + (tokenData.family_name || '')).trim()
+          const picture = tokenData.picture || ''
+
+          if (!email || !googleSub) return Response.json({ error: 'Invalid Google token payload' }, { status: 401 })
+
+          let account = await cloudflare.env.D1.prepare(
+            'SELECT * FROM caregiver_accounts WHERE google_sub = ? OR email = ?'
+          ).bind(googleSub, email).first()
+
+          if (!account) {
+            await cloudflare.env.D1.prepare(
+              'INSERT INTO caregiver_accounts (email, name, google_sub, photo_url) VALUES (?, ?, ?, ?)'
+            ).bind(email, name, googleSub, picture).run()
+            account = await cloudflare.env.D1.prepare(
+              'SELECT * FROM caregiver_accounts WHERE email = ?'
+            ).bind(email).first()
+          } else if (!account.google_sub) {
+            await cloudflare.env.D1.prepare(
+              'UPDATE caregiver_accounts SET google_sub = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+            ).bind(googleSub, account.id).run()
+          }
+
+          const token = crypto.randomUUID() + '-' + crypto.randomUUID()
+          await cloudflare.env.D1.prepare(
+            "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
+          ).bind(token, account.id).run()
+
+          return Response.json({
+            success: true,
+            token,
+            account: {
+              id: account.id,
+              email: account.email,
+              name: account.name || name,
+              zipCode: account.zip_code || '',
+              careTypes: account.care_types ? JSON.parse(account.care_types) : [],
+              phone: account.phone || '',
+              bio: account.bio || '',
+              photoUrl: account.photo_url || picture,
+              setupComplete: account.setup_complete === 1 || account.setup_complete === true,
+            },
+          })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== VALIDATE CAREGIVER SESSION ======
+    {
+      path: '/caregiver-account',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || req.headers.get('x-caregiver-token') || ''
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+
+          const session = await cloudflare.env.D1.prepare(
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first()
+          if (!session) return Response.json({ error: 'Session expired. Please sign in again.' }, { status: 401 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, email, name, zip_code, care_types, phone, bio, photo_url, setup_complete FROM caregiver_accounts WHERE id = ?'
+          ).bind(session.account_id).first()
+          if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
+
+          return Response.json({
+            success: true,
+            account: {
+              id: account.id,
+              email: account.email,
+              name: account.name,
+              zipCode: account.zip_code || '',
+              careTypes: account.care_types ? JSON.parse(account.care_types) : [],
+              phone: account.phone || '',
+              bio: account.bio || '',
+              photoUrl: account.photo_url || '',
+              setupComplete: account.setup_complete === 1 || account.setup_complete === true,
+            },
+          })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CAREGIVER PROFILE SETUP (post-registration) ======
+    {
+      path: '/caregiver-setup',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, zipCode, careTypes, name, phone, bio } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+
+          const session = await cloudflare.env.D1.prepare(
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first()
+          if (!session) return Response.json({ error: 'Session expired' }, { status: 401 })
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_accounts SET zip_code = ?, care_types = ?, setup_complete = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?'
+          ).bind(zipCode || '', JSON.stringify(careTypes || []), session.account_id).run()
+
+          if (name) {
+            await cloudflare.env.D1.prepare(
+              'UPDATE caregiver_accounts SET name = ? WHERE id = ? AND (name = "" OR name IS NULL)'
+            ).bind(name, session.account_id).run()
+          }
+
+          return Response.json({ success: true, message: 'Profile setup complete' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
   ],
 })
