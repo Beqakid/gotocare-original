@@ -2582,5 +2582,159 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ====== CLIENT SELF-REGISTRATION ======
+    {
+      path: '/client-register',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { name, email, password } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+          if (!password) return Response.json({ error: 'password required' }, { status: 400 })
+
+          const existing = await cloudflare.env.D1.prepare(
+            'SELECT id FROM client_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first()
+          if (existing) return Response.json({ error: 'Account already exists. Sign in instead.' }, { status: 409 })
+
+          const salt = crypto.randomUUID()
+          const enc = new TextEncoder()
+          const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + salt))
+          const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO client_accounts (email, password_hash, salt, name) VALUES (?, ?, ?, ?)'
+          ).bind(email.toLowerCase(), passwordHash, salt, name || '').run()
+
+          const sessionToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO client_sessions (email, session_token, expires_at) VALUES (?, ?, ?)'
+          ).bind(email.toLowerCase(), sessionToken, expiresAt).run()
+
+          return Response.json({ success: true, sessionToken, name: name || '', email: email.toLowerCase() })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CLIENT EMAIL LOGIN ======
+    {
+      path: '/client-auth/login',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email, password } = body
+          if (!email || !password) return Response.json({ error: 'email and password required' }, { status: 400 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first() as any
+          if (!account) return Response.json({ error: 'No account found. Please register first.' }, { status: 404 })
+
+          const enc = new TextEncoder()
+          const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + account.salt))
+          const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
+          if (passwordHash !== account.password_hash) return Response.json({ error: 'Incorrect password.' }, { status: 401 })
+
+          const sessionToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO client_sessions (email, session_token, expires_at) VALUES (?, ?, ?)'
+          ).bind(email.toLowerCase(), sessionToken, expiresAt).run()
+
+          return Response.json({ success: true, sessionToken, name: account.name || '', email: email.toLowerCase() })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CLIENT GOOGLE AUTH ======
+    {
+      path: '/client-auth/google',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { idToken, name, email, googleId } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+
+          const existing = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first() as any
+
+          if (!existing) {
+            await cloudflare.env.D1.prepare(
+              'INSERT INTO client_accounts (email, name, google_id) VALUES (?, ?, ?)'
+            ).bind(email.toLowerCase(), name || '', googleId || '').run()
+          } else if (!existing.google_id && googleId) {
+            await cloudflare.env.D1.prepare(
+              'UPDATE client_accounts SET google_id = ?, name = COALESCE(NULLIF(name,""), ?) WHERE email = ?'
+            ).bind(googleId, name || '', email.toLowerCase()).run()
+          }
+
+          const sessionToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO client_sessions (email, session_token, expires_at) VALUES (?, ?, ?)'
+          ).bind(email.toLowerCase(), sessionToken, expiresAt).run()
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first() as any
+
+          return Response.json({ success: true, sessionToken, name: account?.name || name || '', email: email.toLowerCase() })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== VALIDATE CLIENT SESSION ======
+    {
+      path: '/client-account',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || req.headers.get('x-session-token') || ''
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_sessions WHERE session_token = ?'
+          ).bind(token).first() as any
+          if (!session) return Response.json({ valid: false, error: 'Session not found' }, { status: 401 })
+
+          const now = new Date()
+          const expiresAt = new Date(session.expires_at)
+          if (expiresAt < now) return Response.json({ valid: false, error: 'Session expired' }, { status: 401 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, email, name, zip, care_types, created_at FROM client_accounts WHERE email = ?'
+          ).bind(session.email).first() as any
+          if (!account) return Response.json({ valid: false, error: 'Account not found' }, { status: 404 })
+
+          return Response.json({
+            valid: true,
+            account: {
+              id: account.id,
+              email: account.email,
+              name: account.name || '',
+              zip: account.zip || '',
+              careTypes: account.care_types ? JSON.parse(account.care_types) : [],
+            },
+          })
+        } catch (error) {
+          return Response.json({ valid: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+
   ],
 })
