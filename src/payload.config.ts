@@ -2734,6 +2734,74 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ====== CLIENT TEAM (active + past caregivers) ======
+    {
+      path: '/client-team',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+
+          // Validate client session
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime("now")'
+          ).bind(token).first()
+          if (!session) return Response.json({ error: 'Invalid or expired session' }, { status: 401 })
+
+          const email = (session as any).email as string
+          const today = new Date().toISOString().split('T')[0]
+
+          // Get all accepted bookings for this client
+          const result = await cloudflare.env.D1.prepare(
+            'SELECT * FROM caregiver_bookings WHERE client_email = ? AND status = ? ORDER BY preferred_date DESC LIMIT 50'
+          ).bind(email.toLowerCase(), 'accepted').all()
+
+          const bookings = result.results || []
+          const active: any[] = []
+          const past: any[] = []
+
+          for (const b of bookings as any[]) {
+            // Get caregiver info from caregiver_accounts
+            const cg = await cloudflare.env.D1.prepare(
+              'SELECT id, name, email, zip, care_types, created_at FROM caregiver_accounts WHERE id = ?'
+            ).bind(Number(b.caregiver_id)).first() as any
+
+            const careTypes = cg?.care_types
+              ? (typeof cg.care_types === 'string' ? (() => { try { return JSON.parse(cg.care_types) } catch { return [] } })() : cg.care_types)
+              : []
+
+            const caregiverInfo = {
+              id: b.caregiver_id,
+              name: cg?.name || 'Caregiver',
+              email: cg?.email || '',
+              zip: cg?.zip || '',
+              careTypes: careTypes,
+              specialty: Array.isArray(careTypes) && careTypes.length > 0 ? careTypes[0] : 'Home Care',
+              preferredDate: b.preferred_date,
+              preferredTime: b.preferred_time,
+              interviewType: b.interview_type,
+              status: b.status,
+              bookingId: b.id,
+              careNeeds: b.care_needs,
+              createdAt: b.created_at,
+            }
+
+            if (b.preferred_date && b.preferred_date >= today) {
+              active.push(caregiverInfo)
+            } else {
+              past.push(caregiverInfo)
+            }
+          }
+
+          return Response.json({ success: true, active, past, email })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
 
 
   ],
