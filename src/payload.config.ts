@@ -2801,6 +2801,158 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ============ CAREGIVER DOCUMENTS ============
+    {
+      path: '/api/caregiver-documents',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = req.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
+          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const docs = await env.D1.prepare('SELECT * FROM caregiver_documents WHERE caregiver_email = ? ORDER BY created_at DESC').bind(sess.email).all()
+          // Compute status for each doc
+          const now = Date.now()
+          const withStatus = (docs.results || []).map((d: any) => {
+            if (!d.expiry_date) return { ...d, status: 'no_expiry' }
+            const diff = (new Date(d.expiry_date).getTime() - now) / (1000 * 86400)
+            if (diff < 0) return { ...d, status: 'expired' }
+            if (diff < 30) return { ...d, status: 'expiring_soon' }
+            return { ...d, status: 'valid' }
+          })
+          return Response.json({ success: true, documents: withStatus }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/api/caregiver-documents',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = req.env as any
+          const formData = await req.formData()
+          const token = formData.get('token') || ''
+          const name = formData.get('name') || ''
+          const docType = formData.get('doc_type') || 'certification'
+          const expiryDate = formData.get('expiry_date') || ''
+          const file = formData.get('file')
+          if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
+          if (!name) return Response.json({ success: false, error: 'Document name required' }, { headers })
+          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const id = crypto.randomUUID()
+          let r2Key = null
+          let fileName = null
+          if (file && typeof file === 'object' && file.name) {
+            r2Key = `caregiver-docs/${sess.email}/${id}-${file.name}`
+            fileName = file.name
+            const buffer = await file.arrayBuffer()
+            await env.R2.put(r2Key, buffer, { httpMetadata: { contentType: file.type || 'application/octet-stream' } })
+          }
+          // Compute status
+          let status = 'no_expiry'
+          if (expiryDate) {
+            const diff = (new Date(expiryDate).getTime() - Date.now()) / (1000 * 86400)
+            if (diff < 0) status = 'expired'
+            else if (diff < 30) status = 'expiring_soon'
+            else status = 'valid'
+          }
+          await env.D1.prepare('INSERT INTO caregiver_documents (id, caregiver_email, name, doc_type, r2_key, file_name, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, sess.email, name, docType, r2Key, fileName, expiryDate || null, status).run()
+          const doc = { id, caregiver_email: sess.email, name, doc_type: docType, r2_key: r2Key, file_name: fileName, expiry_date: expiryDate || null, status }
+          return Response.json({ success: true, document: doc }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/api/caregiver-documents',
+      method: 'delete',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = req.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          const id = url.searchParams.get('id') || ''
+          if (!token || !id) return Response.json({ success: false, error: 'Token and id required' }, { headers })
+          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          // Get the doc to delete from R2 too
+          const doc = await env.D1.prepare('SELECT r2_key FROM caregiver_documents WHERE id = ? AND caregiver_email = ?').bind(id, sess.email).first()
+          if (doc?.r2_key) {
+            try { await env.R2.delete(doc.r2_key) } catch {}
+          }
+          await env.D1.prepare('DELETE FROM caregiver_documents WHERE id = ? AND caregiver_email = ?').bind(id, sess.email).run()
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/api/caregiver-documents/file',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*' }
+        try {
+          const env = req.env as any
+          const url = new URL(req.url)
+          const key = url.searchParams.get('key') || ''
+          const token = url.searchParams.get('token') || ''
+          if (!key || !token) return Response.json({ error: 'Key and token required' }, { status: 400, headers })
+          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
+          if (!sess) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const obj = await env.R2.get(key)
+          if (!obj) return Response.json({ error: 'File not found' }, { status: 404, headers })
+          const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
+          return new Response(obj.body, { headers: { ...headers, 'Content-Type': contentType, 'Content-Disposition': 'inline' } })
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers })
+        }
+      },
+    },
+    {
+      path: '/api/caregiver-profile-docs',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = req.env as any
+          const url = new URL(req.url)
+          const caregiverEmail = url.searchParams.get('email') || ''
+          const clientToken = url.searchParams.get('clientToken') || ''
+          if (!caregiverEmail) return Response.json({ success: false, error: 'Caregiver email required' }, { headers })
+          // Get all docs for this caregiver
+          const docs = await env.D1.prepare('SELECT id, name, doc_type, expiry_date, status FROM caregiver_documents WHERE caregiver_email = ? ORDER BY created_at DESC').bind(caregiverEmail).all()
+          const docList = docs.results || []
+          const count = docList.length
+          // Check if client has paid subscription
+          if (clientToken) {
+            const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
+            if (sess) {
+              const sub = await env.D1.prepare('SELECT plan, status FROM client_subscriptions WHERE email = ? AND status = \'active\'').bind(sess.email).first()
+              if (sub) {
+                // Subscriber: return full doc metadata (no files)
+                return Response.json({ success: true, subscribed: true, documents: docList, count }, { headers })
+              }
+            }
+          }
+          // Not subscribed: return count only
+          return Response.json({ success: true, subscribed: false, documents: [], count }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+
 
 
 
