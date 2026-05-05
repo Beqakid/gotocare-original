@@ -2952,6 +2952,377 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ====== CAREGIVER TIME ENTRIES ======
+    {
+      path: '/caregiver-time-entries',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          const result = await cloudflare.env.D1.prepare('SELECT * FROM caregiver_time_entries WHERE caregiver_email = ? ORDER BY date DESC, created_at DESC LIMIT 200').bind(sess.caregiver_email).all()
+          const entries = (result.results || []).map((e: any) => ({
+            id: 'cloud_' + e.id,
+            clientName: e.client_name,
+            date: e.date,
+            startTime: e.start_time,
+            endTime: e.end_time,
+            duration: e.duration_mins,
+            hourlyRate: e.hourly_rate,
+            billingType: e.billing_type,
+            otAfterHrs: e.ot_after_hrs,
+            otMultiplier: e.ot_multiplier,
+            regularHours: e.regular_hours,
+            overtimeHours: e.overtime_hours,
+            regularPay: e.regular_pay,
+            overtimePay: e.overtime_pay,
+            totalPay: e.total_pay,
+            notes: e.notes,
+            status: e.status,
+            createdAt: e.created_at,
+            cloudId: e.id,
+          }))
+          return Response.json({ success: true, entries })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-time-entries',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, entry } = body
+          if (!token || !entry) return Response.json({ error: 'token and entry required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_time_entries (caregiver_email, client_name, date, start_time, end_time, duration_mins, hourly_rate, billing_type, ot_after_hrs, ot_multiplier, regular_hours, overtime_hours, regular_pay, overtime_pay, total_pay, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(
+            sess.caregiver_email,
+            entry.clientName || '',
+            entry.date || new Date().toISOString().split('T')[0],
+            entry.startTime || '',
+            entry.endTime || '',
+            entry.duration || 0,
+            entry.hourlyRate || 25,
+            entry.billingType || 'hourly',
+            entry.otAfterHrs || 8,
+            entry.otMultiplier || 1.5,
+            entry.regularHours || 0,
+            entry.overtimeHours || 0,
+            entry.regularPay || 0,
+            entry.overtimePay || 0,
+            entry.totalPay || 0,
+            entry.notes || '',
+            entry.status || 'completed'
+          ).run()
+          const row = await cloudflare.env.D1.prepare('SELECT last_insert_rowid() as id').first()
+          return Response.json({ success: true, cloudId: row?.id })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-time-entries',
+      method: 'delete' as any,
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const cloudId = url.searchParams.get('cloudId')
+          if (!token || !cloudId) return Response.json({ error: 'token and cloudId required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare('DELETE FROM caregiver_time_entries WHERE id = ? AND caregiver_email = ?').bind(Number(cloudId), sess.caregiver_email).run()
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CAREGIVER ACTIVE TIMER ======
+    {
+      path: '/caregiver-active-timer',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ timer: null })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ timer: null })
+          const row = await cloudflare.env.D1.prepare('SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?').bind(sess.caregiver_email).first()
+          if (!row) return Response.json({ timer: null })
+          return Response.json({ timer: { clientName: row.client_name, startTime: row.start_time, hourlyRate: row.hourly_rate, billingType: row.billing_type, otAfterHrs: row.ot_after_hrs, otMultiplier: row.ot_multiplier, notes: row.notes } })
+        } catch (error) {
+          return Response.json({ timer: null })
+        }
+      },
+    },
+    {
+      path: '/caregiver-active-timer',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, timer } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          if (!timer) {
+            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(sess.caregiver_email).run()
+          } else {
+            await cloudflare.env.D1.prepare('INSERT INTO caregiver_active_timer (caregiver_email, client_name, start_time, hourly_rate, billing_type, ot_after_hrs, ot_multiplier, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(caregiver_email) DO UPDATE SET client_name=excluded.client_name, start_time=excluded.start_time, hourly_rate=excluded.hourly_rate, billing_type=excluded.billing_type, ot_after_hrs=excluded.ot_after_hrs, ot_multiplier=excluded.ot_multiplier, notes=excluded.notes, updated_at=datetime("now")').bind(sess.caregiver_email, timer.clientName || '', timer.startTime || '', timer.hourlyRate || 25, timer.billingType || 'hourly', timer.otAfterHrs || 8, timer.otMultiplier || 1.5, timer.notes || '').run()
+          }
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CAREGIVER PERSONAL INVOICES ======
+    {
+      path: '/caregiver-personal-invoices',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          const result = await cloudflare.env.D1.prepare('SELECT * FROM caregiver_personal_invoices WHERE caregiver_email = ? ORDER BY created_at DESC LIMIT 100').bind(sess.caregiver_email).all()
+          const invoices = (result.results || []).map((inv: any) => ({
+            id: 'cloud_' + inv.id,
+            cloudId: inv.id,
+            invoiceNumber: inv.invoice_number,
+            clientName: inv.client_name,
+            clientEmail: inv.client_email,
+            items: (() => { try { return JSON.parse(inv.items_json) } catch { return [] } })(),
+            subtotal: inv.subtotal,
+            total: inv.total,
+            status: inv.status,
+            issueDate: inv.issue_date,
+            dueDate: inv.due_date,
+            notes: inv.notes,
+            createdAt: inv.created_at,
+          }))
+          return Response.json({ success: true, invoices })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-personal-invoices',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, invoice } = body
+          if (!token || !invoice) return Response.json({ error: 'token and invoice required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_personal_invoices (caregiver_email, invoice_number, client_name, client_email, items_json, subtotal, total, status, issue_date, due_date, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(
+            sess.caregiver_email,
+            invoice.invoiceNumber || 'INV-' + Date.now(),
+            invoice.clientName || '',
+            invoice.clientEmail || '',
+            JSON.stringify(invoice.items || []),
+            invoice.subtotal || 0,
+            invoice.total || 0,
+            invoice.status || 'draft',
+            invoice.issueDate || new Date().toISOString().split('T')[0],
+            invoice.dueDate || new Date(Date.now() + 30*86400000).toISOString().split('T')[0],
+            invoice.notes || ''
+          ).run()
+          const row = await cloudflare.env.D1.prepare('SELECT last_insert_rowid() as id').first()
+          return Response.json({ success: true, cloudId: row?.id })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-personal-invoices',
+      method: 'patch' as any,
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, cloudId, updates } = body
+          if (!token || !cloudId) return Response.json({ error: 'token and cloudId required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          if (updates.status) {
+            await cloudflare.env.D1.prepare('UPDATE caregiver_personal_invoices SET status = ? WHERE id = ? AND caregiver_email = ?').bind(updates.status, Number(cloudId), sess.caregiver_email).run()
+          }
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-personal-invoices',
+      method: 'delete' as any,
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const cloudId = url.searchParams.get('cloudId')
+          if (!token || !cloudId) return Response.json({ error: 'token and cloudId required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare('DELETE FROM caregiver_personal_invoices WHERE id = ? AND caregiver_email = ?').bind(Number(cloudId), sess.caregiver_email).run()
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CAREGIVER PRIVATE CLIENTS ======
+    {
+      path: '/caregiver-private-clients',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          const result = await cloudflare.env.D1.prepare('SELECT * FROM caregiver_private_clients WHERE caregiver_email = ? ORDER BY created_at ASC').bind(sess.caregiver_email).all()
+          const clients = (result.results || []).map((c: any) => ({
+            id: 'cloud_' + c.id,
+            cloudId: c.id,
+            name: c.name,
+            phone: c.phone,
+            hourlyRate: c.hourly_rate,
+            careType: c.care_type,
+            billingType: c.billing_type,
+            otAfterHrs: c.ot_after_hrs,
+            otMultiplier: c.ot_multiplier,
+            notes: c.notes,
+            createdAt: c.created_at,
+          }))
+          return Response.json({ success: true, clients })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-private-clients',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, client } = body
+          if (!token || !client) return Response.json({ error: 'token and client required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_private_clients (caregiver_email, name, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          ).bind(sess.caregiver_email, client.name || '', client.phone || '', client.hourlyRate || 25, client.careType || '', client.billingType || 'hourly', client.otAfterHrs || 8, client.otMultiplier || 1.5, client.notes || '').run()
+          const row = await cloudflare.env.D1.prepare('SELECT last_insert_rowid() as id').first()
+          return Response.json({ success: true, cloudId: row?.id })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-private-clients',
+      method: 'delete' as any,
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const cloudId = url.searchParams.get('cloudId')
+          if (!token || !cloudId) return Response.json({ error: 'token and cloudId required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare('DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_email = ?').bind(Number(cloudId), sess.caregiver_email).run()
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CAREGIVER MILEAGE ======
+    {
+      path: '/caregiver-mileage',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          const result = await cloudflare.env.D1.prepare('SELECT * FROM caregiver_mileage WHERE caregiver_email = ? ORDER BY date DESC LIMIT 200').bind(sess.caregiver_email).all()
+          const entries = (result.results || []).map((m: any) => ({
+            id: 'cloud_' + m.id,
+            cloudId: m.id,
+            date: m.date,
+            clientName: m.client_name,
+            miles: m.miles,
+            purpose: m.purpose,
+            createdAt: m.created_at,
+          }))
+          return Response.json({ success: true, entries })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-mileage',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, entry } = body
+          if (!token || !entry) return Response.json({ error: 'token and entry required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO caregiver_mileage (caregiver_email, date, client_name, miles, purpose) VALUES (?, ?, ?, ?, ?)'
+          ).bind(sess.caregiver_email, entry.date || new Date().toISOString().split('T')[0], entry.clientName || '', entry.miles || 0, entry.purpose || '').run()
+          const row = await cloudflare.env.D1.prepare('SELECT last_insert_rowid() as id').first()
+          return Response.json({ success: true, cloudId: row?.id })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/caregiver-mileage',
+      method: 'delete' as any,
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const cloudId = url.searchParams.get('cloudId')
+          if (!token || !cloudId) return Response.json({ error: 'token and cloudId required' }, { status: 400 })
+          const sess = await cloudflare.env.D1.prepare('SELECT caregiver_email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime("now")').bind(token).first()
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          await cloudflare.env.D1.prepare('DELETE FROM caregiver_mileage WHERE id = ? AND caregiver_email = ?').bind(Number(cloudId), sess.caregiver_email).run()
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
 
 
 
