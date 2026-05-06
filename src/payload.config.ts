@@ -2786,7 +2786,7 @@ Return a JSON object with these fields:
         }
       },
     },
-    // ====== CLIENT TEAM (active + past caregivers) ======
+    // ====== CLIENT TEAM (hired + active bookings + past) ======
     {
       path: '/client-team',
       method: 'get',
@@ -2796,60 +2796,211 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ error: 'token required' }, { status: 400 })
 
-          // Validate client session
+          // Validate client session (field is session_token, not token)
           const session = await cloudflare.env.D1.prepare(
-            'SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime("now")'
-          ).bind(token).first()
+            'SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime("now")'
+          ).bind(token).first() as any
           if (!session) return Response.json({ error: 'Invalid or expired session' }, { status: 401 })
 
-          const email = (session as any).email as string
-          const today = new Date().toISOString().split('T')[0]
+          const clientEmail = session.email.toLowerCase()
 
-          // Get all accepted bookings for this client
-          const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_bookings WHERE client_email = ? AND status = ? ORDER BY preferred_date DESC LIMIT 50'
-          ).bind(email.toLowerCase(), 'accepted').all()
+          // ── 1. Formally hired caregivers from client_team ──
+          const hiredRows = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_team WHERE client_email = ? AND status = ? ORDER BY hired_at DESC'
+          ).bind(clientEmail, 'active').all()
 
-          const bookings = result.results || []
-          const active: any[] = []
-          const past: any[] = []
-
-          for (const b of bookings as any[]) {
-            // Get caregiver info from caregiver_accounts
+          const hired: any[] = []
+          for (const row of (hiredRows.results || []) as any[]) {
             const cg = await cloudflare.env.D1.prepare(
-              'SELECT id, name, email, zip, care_types, created_at FROM caregiver_accounts WHERE id = ?'
+              'SELECT id, name, email, photo_url, hourly_rate, skills, certifications, city, state, zip_code, care_types, bio FROM caregiver_accounts WHERE id = ?'
+            ).bind(Number(row.caregiver_id)).first() as any
+
+            const parseJSON = (v: any) => { try { return JSON.parse(v) } catch { return [] } }
+            const careTypes = cg?.care_types ? parseJSON(cg.care_types) : []
+            const skills = cg?.skills ? parseJSON(cg.skills) : []
+            const certs = cg?.certifications ? parseJSON(cg.certifications) : []
+
+            hired.push({
+              id: cg?.id || row.caregiver_id,
+              name: cg?.name || 'Caregiver',
+              email: cg?.email || '',
+              photoUrl: cg?.photo_url || null,
+              hourlyRate: cg?.hourly_rate || 28,
+              skills,
+              certifications: certs,
+              specialty: skills.length > 0 ? skills[0] : (careTypes.length > 0 ? careTypes[0] : 'Home Care'),
+              city: cg?.city || '',
+              state: cg?.state || '',
+              bio: cg?.bio || '',
+              bookingId: row.booking_id,
+              hiredAt: row.hired_at,
+              isHired: true,
+            })
+          }
+
+          // ── 2. Accepted bookings NOT yet formally hired ──
+          const hiredCgIds = hired.map((h: any) => h.id)
+          const bookingResult = await cloudflare.env.D1.prepare(
+            'SELECT * FROM caregiver_bookings WHERE client_email = ? AND status IN ("accepted") ORDER BY preferred_date DESC LIMIT 50'
+          ).bind(clientEmail).all()
+
+          const active: any[] = []
+          for (const b of (bookingResult.results || []) as any[]) {
+            if (hiredCgIds.includes(Number(b.caregiver_id))) continue // already in hired list
+            const cg = await cloudflare.env.D1.prepare(
+              'SELECT id, name, email, photo_url, hourly_rate, skills, care_types FROM caregiver_accounts WHERE id = ?'
             ).bind(Number(b.caregiver_id)).first() as any
 
-            const careTypes = cg?.care_types
-              ? (typeof cg.care_types === 'string' ? (() => { try { return JSON.parse(cg.care_types) } catch { return [] } })() : cg.care_types)
-              : []
+            const parseJSON = (v: any) => { try { return JSON.parse(v) } catch { return [] } }
+            const careTypes = cg?.care_types ? parseJSON(cg.care_types) : []
+            const skills = cg?.skills ? parseJSON(cg.skills) : []
 
-            const caregiverInfo = {
+            active.push({
               id: b.caregiver_id,
               name: cg?.name || 'Caregiver',
               email: cg?.email || '',
-              zip: cg?.zip || '',
-              careTypes: careTypes,
-              specialty: Array.isArray(careTypes) && careTypes.length > 0 ? careTypes[0] : 'Home Care',
+              photoUrl: cg?.photo_url || null,
+              hourlyRate: cg?.hourly_rate || 28,
+              specialty: skills.length > 0 ? skills[0] : (careTypes.length > 0 ? careTypes[0] : 'Home Care'),
               preferredDate: b.preferred_date,
               preferredTime: b.preferred_time,
               interviewType: b.interview_type,
-              status: b.status,
               bookingId: b.id,
-              careNeeds: b.care_needs,
-              createdAt: b.created_at,
-            }
-
-            if (b.preferred_date && b.preferred_date >= today) {
-              active.push(caregiverInfo)
-            } else {
-              past.push(caregiverInfo)
-            }
+              status: b.status,
+              isHired: false,
+            })
           }
 
-          return Response.json({ success: true, active, past, email })
+          // ── 3. Past / removed ──
+          const pastRows = await cloudflare.env.D1.prepare(
+            "SELECT * FROM client_team WHERE client_email = ? AND status IN ('removed','completed') ORDER BY hired_at DESC"
+          ).bind(clientEmail).all()
+
+          const past: any[] = []
+          for (const row of (pastRows.results || []) as any[]) {
+            const cg = await cloudflare.env.D1.prepare(
+              'SELECT id, name, email, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?'
+            ).bind(Number(row.caregiver_id)).first() as any
+            const parseJSON = (v: any) => { try { return JSON.parse(v) } catch { return [] } }
+            const skills = cg?.skills ? parseJSON(cg.skills) : []
+            past.push({
+              id: cg?.id || row.caregiver_id,
+              name: cg?.name || 'Caregiver',
+              email: cg?.email || '',
+              photoUrl: cg?.photo_url || null,
+              hourlyRate: cg?.hourly_rate || 28,
+              specialty: skills.length > 0 ? skills[0] : 'Home Care',
+              status: row.status,
+            })
+          }
+
+          return Response.json({ success: true, hired, active, past, email: clientEmail })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== HIRE CAREGIVER (add to My Team) ======
+    {
+      path: '/hire-caregiver',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json() as any
+          const { caregiverId, bookingId, token } = body
+          if (!token || !caregiverId) return Response.json({ error: 'token and caregiverId required' }, { status: 400 })
+
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime("now")'
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired session' }, { status: 401 })
+
+          const clientEmail = session.email.toLowerCase()
+
+          // Upsert into client_team
+          await cloudflare.env.D1.prepare(
+            'INSERT OR REPLACE INTO client_team (client_email, caregiver_id, booking_id, status, hired_at) VALUES (?, ?, ?, "active", datetime("now"))'
+          ).bind(clientEmail, Number(caregiverId), bookingId ? Number(bookingId) : null).run()
+
+          // Update booking status to hired
+          if (bookingId) {
+            await cloudflare.env.D1.prepare(
+              'UPDATE caregiver_bookings SET status = "hired" WHERE id = ? AND client_email = ?'
+            ).bind(Number(bookingId), clientEmail).run()
+          }
+
+          // Return updated caregiver info
+          const cg = await cloudflare.env.D1.prepare(
+            'SELECT id, name, email, photo_url, hourly_rate, skills, city, state FROM caregiver_accounts WHERE id = ?'
+          ).bind(Number(caregiverId)).first() as any
+
+          return Response.json({ success: true, caregiverName: cg?.name || 'Caregiver' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== REMOVE FROM TEAM ======
+    {
+      path: '/remove-from-team',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json() as any
+          const { caregiverId, token } = body
+          if (!token || !caregiverId) return Response.json({ error: 'token and caregiverId required' }, { status: 400 })
+
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime("now")'
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired session' }, { status: 401 })
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE client_team SET status = "removed" WHERE client_email = ? AND caregiver_id = ?'
+          ).bind(session.email.toLowerCase(), Number(caregiverId)).run()
+
+          return Response.json({ success: true })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== MY CLIENTS (caregiver portal — who hired me) ======
+    {
+      path: '/my-clients',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = req.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
+
+          const sess = await env.D1.prepare(
+            "SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+
+          const cgRow = await env.D1.prepare(
+            'SELECT id FROM caregiver_accounts WHERE email = ?'
+          ).bind(sess.email).first() as any
+          if (!cgRow) return Response.json({ success: false, error: 'Caregiver not found' }, { headers })
+
+          const rows = await env.D1.prepare(
+            'SELECT ct.*, ca.name AS client_name, ca.email AS client_email_addr FROM client_team ct LEFT JOIN client_accounts ca ON ca.email = ct.client_email WHERE ct.caregiver_id = ? AND ct.status = "active" ORDER BY ct.hired_at DESC'
+          ).bind(Number(cgRow.id)).all()
+
+          const clients = (rows.results || []).map((r: any) => ({
+            clientEmail: r.client_email,
+            name: r.client_name || r.client_email,
+            hiredAt: r.hired_at,
+            bookingId: r.booking_id,
+          }))
+
+          return Response.json({ success: true, clients }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { headers })
         }
       },
     },
