@@ -52,7 +52,7 @@ export default buildConfig({
     },
   },
   collections: [Users, Media, Agencies, Locations, Clients, Caregivers, Services, Shifts, Timesheets, Invoices, Leads, CaregiverDocuments, MarketingPosts, SocialAccounts],
-  secret: process.env.PAYLOAD_SECRET || 'gotocare-super-secret-key-2024',
+  secret: process.env.PAYLOAD_SECRET || 'carehia-super-secret-key-2024',
   typescript: {
     outputFile: path.resolve(dirname, 'payload-types.ts'),
   },
@@ -1450,7 +1450,7 @@ export default buildConfig({
             const amountStr = session.amount_total ? (session.amount_total / 100).toFixed(2) : '0.00'
             return new Response(`<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Payment Successful - GoToCare</title>
+<title>Payment Successful - Carehia</title>
 <style>
 body{margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);display:flex;align-items:center;justify-content:center;min-height:100vh}
 .card{background:#fff;border-radius:20px;padding:48px;text-align:center;max-width:480px;box-shadow:0 20px 60px rgba(0,0,0,.2)}
@@ -1485,7 +1485,7 @@ h1{color:#f59e0b;margin-top:80px}p{color:#64748b}</style></head>
       method: 'get',
       handler: async (req) => {
         return new Response(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Payment Cancelled - GoToCare</title>
+<html><head><meta charset="utf-8"><title>Payment Cancelled - Carehia</title>
 <style>body{margin:0;padding:40px;font-family:sans-serif;text-align:center;background:#f8fafc}
 h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
 <body><h1>Payment Cancelled</h1><p>Your payment was cancelled. You can return to your portal and try again.</p></body></html>`,
@@ -3711,7 +3711,7 @@ Return a JSON object with these fields:
               'Content-Type': 'application/json',
             },
             body: JSON.stringify({
-              from: 'GoToCare <hello@carehia.com>',
+              from: 'Carehia <hello@carehia.com>',
               to: [caregiverEmail],
               subject: '🔔 You have a new care request!',
               html: `
@@ -3728,7 +3728,7 @@ Return a JSON object with these fields:
         <!-- Header -->
         <tr>
           <td style="background:linear-gradient(135deg,#7C5CFF 0%,#4A90E2 100%);padding:32px 40px;text-align:center;">
-            <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">GoToCare</h1>
+            <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">Carehia</h1>
             <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Your caregiving platform</p>
           </td>
         </tr>
@@ -3737,7 +3737,7 @@ Return a JSON object with these fields:
           <td style="padding:40px;">
             <h2 style="margin:0 0 16px;color:#0f172a;font-size:22px;font-weight:700;">Hi ${firstName}! 👋</h2>
             <p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
-              You have a <strong>new care request</strong> waiting for you on GoToCare.
+              You have a <strong>new care request</strong> waiting for you on Carehia.
             </p>
             <div style="background:#f1f5f9;border-radius:12px;padding:20px 24px;margin:0 0 28px;">
               <p style="margin:0;color:#64748b;font-size:14px;">A family is looking for care and you're a great match. Open your portal to see the details and decide if you'd like to connect.</p>
@@ -3759,10 +3759,10 @@ Return a JSON object with these fields:
         <tr>
           <td style="background:#f8fafc;padding:20px 40px;text-align:center;border-top:1px solid #e2e8f0;">
             <p style="margin:0;color:#94a3b8;font-size:12px;">
-              © ${new Date().getFullYear()} GoToCare · 
+              © ${new Date().getFullYear()} Carehia · 
               <a href="https://gotocare-caregiver-portal.pages.dev" style="color:#7C5CFF;text-decoration:none;">Open Portal</a> · 
               Questions? <a href="mailto:support@carehia.com" style="color:#7C5CFF;text-decoration:none;">support@carehia.com</a><br>
-              You're receiving this because you're a registered caregiver on GoToCare.
+              You're receiving this because you're a registered caregiver on Carehia.
             </p>
           </td>
         </tr>
@@ -3785,6 +3785,304 @@ Return a JSON object with these fields:
       },
     },
 
+    // ============================================================
+    // META OAUTH + POSTING ENDPOINTS
+    // ============================================================
+
+    // Setup Meta D1 tables
+    {
+      path: '/meta-setup',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const db = (cloudflare as any).env.D1
+          await db.exec(`CREATE TABLE IF NOT EXISTS meta_connections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_email TEXT NOT NULL,
+            owner_type TEXT NOT NULL DEFAULT 'caregiver',
+            page_id TEXT NOT NULL,
+            page_name TEXT,
+            page_access_token TEXT NOT NULL,
+            ig_account_id TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            UNIQUE(owner_email, page_id)
+          )`)
+          await db.exec(`CREATE TABLE IF NOT EXISTS meta_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_email TEXT NOT NULL,
+            page_id TEXT NOT NULL,
+            message TEXT NOT NULL,
+            image_url TEXT,
+            fb_post_id TEXT,
+            ig_post_id TEXT,
+            status TEXT DEFAULT 'posted',
+            posted_at TEXT DEFAULT (datetime('now')),
+            created_at TEXT DEFAULT (datetime('now'))
+          )`)
+          return Response.json({ success: true, message: 'Meta tables created' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Start Meta OAuth flow
+    {
+      path: '/meta-oauth-start',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const ownerEmail = url.searchParams.get('ownerEmail') || ''
+          const ownerType = url.searchParams.get('ownerType') || 'caregiver'
+          const appId = (cloudflare as any).env.META_APP_ID
+          if (!appId) return Response.json({ success: false, error: 'META_APP_ID not configured' }, { status: 500, headers })
+          const redirectUri = encodeURIComponent('https://gotocare-original.jjioji.workers.dev/api/meta-oauth-callback')
+          const stateJson = JSON.stringify({ ownerEmail, ownerType })
+          const state = btoa(stateJson)
+          const scope = 'pages_show_list,pages_manage_posts,pages_read_engagement,instagram_basic,instagram_content_publish'
+          const oauthUrl = `https://www.facebook.com/v19.0/dialog/oauth?client_id=${appId}&redirect_uri=${redirectUri}&state=${state}&scope=${scope}&response_type=code`
+          return Response.json({ success: true, oauthUrl }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Meta OAuth callback
+    {
+      path: '/meta-oauth-callback',
+      method: 'get',
+      handler: async (req: any) => {
+        try {
+          const url = new URL(req.url)
+          const code = url.searchParams.get('code')
+          const stateB64 = url.searchParams.get('state') || ''
+          const errorParam = url.searchParams.get('error')
+          if (errorParam || !code) {
+            return Response.redirect('https://gotocare-caregiver-portal.pages.dev/?tab=marketing&meta=denied', 302)
+          }
+          let ownerEmail = '', ownerType = 'caregiver'
+          try {
+            const stateData = JSON.parse(atob(stateB64))
+            ownerEmail = stateData.ownerEmail || ''
+            ownerType = stateData.ownerType || 'caregiver'
+          } catch {}
+          const appId = (cloudflare as any).env.META_APP_ID
+          const appSecret = (cloudflare as any).env.META_APP_SECRET
+          const redirectUri = encodeURIComponent('https://gotocare-original.jjioji.workers.dev/api/meta-oauth-callback')
+          // Exchange code for short-lived token
+          const tokenRes = await fetch(`https://graph.facebook.com/v19.0/oauth/access_token?client_id=${appId}&redirect_uri=${redirectUri}&client_secret=${appSecret}&code=${code}`)
+          const tokenData = await tokenRes.json() as any
+          if (!tokenData.access_token) {
+            return Response.redirect('https://gotocare-caregiver-portal.pages.dev/?tab=marketing&meta=error', 302)
+          }
+          // Exchange for long-lived token
+          const llRes = await fetch(`https://graph.facebook.com/v19.0/oauth/access_token?grant_type=fb_exchange_token&client_id=${appId}&client_secret=${appSecret}&fb_exchange_token=${tokenData.access_token}`)
+          const llData = await llRes.json() as any
+          const longLivedToken = llData.access_token || tokenData.access_token
+          // Get user pages
+          const pagesRes = await fetch(`https://graph.facebook.com/v19.0/me/accounts?access_token=${longLivedToken}`)
+          const pagesData = await pagesRes.json() as any
+          const db = (cloudflare as any).env.D1
+          // Ensure tables exist
+          await db.exec(`CREATE TABLE IF NOT EXISTS meta_connections (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_email TEXT NOT NULL, owner_type TEXT NOT NULL DEFAULT 'caregiver', page_id TEXT NOT NULL, page_name TEXT, page_access_token TEXT NOT NULL, ig_account_id TEXT, created_at TEXT DEFAULT (datetime('now')), UNIQUE(owner_email, page_id))`)
+          if (pagesData.data && pagesData.data.length > 0) {
+            for (const page of pagesData.data) {
+              let igAccountId = null
+              try {
+                const igRes = await fetch(`https://graph.facebook.com/v19.0/${page.id}?fields=instagram_business_account&access_token=${page.access_token}`)
+                const igData = await igRes.json() as any
+                if (igData.instagram_business_account) igAccountId = igData.instagram_business_account.id
+              } catch {}
+              await db.prepare(`INSERT OR REPLACE INTO meta_connections (owner_email, owner_type, page_id, page_name, page_access_token, ig_account_id) VALUES (?, ?, ?, ?, ?, ?)`).bind(ownerEmail, ownerType, page.id, page.name, page.access_token, igAccountId).run()
+            }
+          }
+          return Response.redirect('https://gotocare-caregiver-portal.pages.dev/?tab=marketing&meta=connected', 302)
+        } catch (error) {
+          return Response.redirect('https://gotocare-caregiver-portal.pages.dev/?tab=marketing&meta=error', 302)
+        }
+      },
+    },
+
+    // Get connected Meta pages
+    {
+      path: '/meta-pages',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const ownerEmail = url.searchParams.get('ownerEmail') || ''
+          if (!ownerEmail) return Response.json({ success: false, error: 'ownerEmail required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const result = await db.prepare('SELECT id, page_id, page_name, ig_account_id, created_at FROM meta_connections WHERE owner_email = ?').bind(ownerEmail).all()
+          return Response.json({ success: true, pages: result.results }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Create Meta post (FB + optionally IG)
+    {
+      path: '/meta-post',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { ownerEmail, pageId, message, imageUrl, postToInstagram } = body
+          if (!ownerEmail || !pageId || !message) return Response.json({ success: false, error: 'ownerEmail, pageId, message required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const conn = await db.prepare('SELECT * FROM meta_connections WHERE owner_email = ? AND page_id = ?').bind(ownerEmail, pageId).first() as any
+          if (!conn) return Response.json({ success: false, error: 'Page not connected. Please reconnect your Facebook page.' }, { status: 404, headers })
+          const pageToken = conn.page_access_token
+          let fbPostId = null, igPostId = null
+          // Post to Facebook
+          const fbEndpoint = imageUrl ? `https://graph.facebook.com/v19.0/${pageId}/photos` : `https://graph.facebook.com/v19.0/${pageId}/feed`
+          const fbPayload: any = { message, access_token: pageToken }
+          if (imageUrl) fbPayload.url = imageUrl
+          const fbRes = await fetch(fbEndpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(fbPayload) })
+          const fbData = await fbRes.json() as any
+          fbPostId = fbData.id || null
+          // Post to Instagram if requested and image provided
+          if (postToInstagram && conn.ig_account_id && imageUrl) {
+            const containerRes = await fetch(`https://graph.facebook.com/v19.0/${conn.ig_account_id}/media`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_url: imageUrl, caption: message, access_token: pageToken }) })
+            const containerData = await containerRes.json() as any
+            if (containerData.id) {
+              const publishRes = await fetch(`https://graph.facebook.com/v19.0/${conn.ig_account_id}/media_publish`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ creation_id: containerData.id, access_token: pageToken }) })
+              const publishData = await publishRes.json() as any
+              igPostId = publishData.id || null
+            }
+          }
+          // Ensure posts table exists
+          await db.exec(`CREATE TABLE IF NOT EXISTS meta_posts (id INTEGER PRIMARY KEY AUTOINCREMENT, owner_email TEXT NOT NULL, page_id TEXT NOT NULL, message TEXT NOT NULL, image_url TEXT, fb_post_id TEXT, ig_post_id TEXT, status TEXT DEFAULT 'posted', posted_at TEXT DEFAULT (datetime('now')), created_at TEXT DEFAULT (datetime('now')))`)
+          await db.prepare(`INSERT INTO meta_posts (owner_email, page_id, message, image_url, fb_post_id, ig_post_id, status) VALUES (?, ?, ?, ?, ?, ?, 'posted')`).bind(ownerEmail, pageId, message, imageUrl || null, fbPostId, igPostId).run()
+          return Response.json({ success: true, fbPostId, igPostId }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Generate AI post content
+    {
+      path: '/meta-generate-post',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { topic, tone, ownerType } = body
+          const openaiKey = (cloudflare as any).env.OPENAI_API_KEY
+          if (!openaiKey) return Response.json({ success: false, error: 'OPENAI_API_KEY not configured' }, { status: 500, headers })
+          const prompt = ownerType === 'caregiver'
+            ? `Write a compelling Facebook/Instagram post for a professional caregiver promoting their services. Topic: ${topic || 'caregiving services'}. Tone: ${tone || 'warm and professional'}. Include 3-5 relevant hashtags at the end. Keep it under 200 words. Do not use quotation marks around the post.`
+            : `Write a compelling Facebook/Instagram post for a home care platform. Topic: ${topic || 'finding trusted care'}. Tone: ${tone || 'professional and caring'}. Include 3-5 relevant hashtags at the end. Keep it under 200 words. Do not use quotation marks.`
+          const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${openaiKey}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'gpt-4o-mini', messages: [{ role: 'user', content: prompt }], max_tokens: 300 })
+          })
+          const aiData = await aiRes.json() as any
+          const content = aiData.choices?.[0]?.message?.content || ''
+          return Response.json({ success: true, content }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Get post history
+    {
+      path: '/meta-posts',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const ownerEmail = url.searchParams.get('ownerEmail') || ''
+          if (!ownerEmail) return Response.json({ success: false, error: 'ownerEmail required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const result = await db.prepare('SELECT id, page_id, message, image_url, fb_post_id, ig_post_id, status, posted_at FROM meta_posts WHERE owner_email = ? ORDER BY created_at DESC LIMIT 50').bind(ownerEmail).all()
+          return Response.json({ success: true, posts: result.results }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Public caregiver profile (no auth required)
+    {
+      path: '/public-profile',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const result = await db.prepare(
+            'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
+          ).bind(parseInt(id)).first()
+          if (!result) return Response.json({ success: false, error: 'Profile not found' }, { status: 404, headers })
+          let skills = []
+          let certifications = []
+          try { skills = JSON.parse((result as any).skills || '[]') } catch {}
+          try { certifications = JSON.parse((result as any).certifications || '[]') } catch {}
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications } }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Save/get caregiver availability
+    {
+      path: '/caregiver-availability',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
+          const avail = await db.prepare('SELECT availability_json FROM caregiver_availability WHERE caregiver_id = ?').bind((session as any).caregiver_id).first()
+          return Response.json({ success: true, availability: avail ? JSON.parse((avail as any).availability_json || '{}') : {} }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+    {
+      path: '/caregiver-availability',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const body = await req.json()
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
+          await db.prepare('INSERT OR REPLACE INTO caregiver_availability (caregiver_id, availability_json, updated_at) VALUES (?, ?, datetime(\'now\'))').bind((session as any).caregiver_id, JSON.stringify(body.availability || {})).run()
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
 
   ],
 })
