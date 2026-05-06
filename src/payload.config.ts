@@ -2203,6 +2203,25 @@ Return a JSON object with these fields:
           await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_bookings (caregiver_id, client_email, care_needs, preferred_date, preferred_time, interview_type, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', notes || '', 'pending').run()
+          // Send email nudge to caregiver (fire and forget)
+          try {
+            const cgRow = await cloudflare.env.D1.prepare(
+              'SELECT name, email FROM caregiver_accounts WHERE id = ?'
+            ).bind(String(caregiverId)).first() as any
+            if (cgRow?.email) {
+              const bookingRow = await cloudflare.env.D1.prepare(
+                'SELECT last_insert_rowid() as id'
+              ).first() as any
+              fetch('https://gotocare-original.jjioji.workers.dev/api/send-booking-nudge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  caregiverEmail: cgRow.email,
+                  caregiverName: cgRow.name || '',
+                }),
+              }).catch(() => {})
+            }
+          } catch (e) {}
           return Response.json({ success: true, message: 'Interview request sent' })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
@@ -3668,6 +3687,103 @@ Return a JSON object with these fields:
         }
       },
     },
+
+    // ====== SEND BOOKING NUDGE EMAIL (Resend) ======
+    {
+      path: '/send-booking-nudge',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { caregiverEmail, caregiverName, bookingId } = body
+          if (!caregiverEmail) return Response.json({ success: false, error: 'caregiverEmail required' }, { status: 400, headers })
+
+          const resendKey = cloudflare.env.RESEND_API_KEY
+          if (!resendKey) return Response.json({ success: false, error: 'RESEND_API_KEY not configured' }, { status: 500, headers })
+
+          const firstName = caregiverName ? caregiverName.split(' ')[0] : 'there'
+
+          const emailRes = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${resendKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: 'GoToCare <noreply@carehia.com>',
+              to: [caregiverEmail],
+              subject: '🔔 You have a new care request!',
+              html: `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:40px 20px;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08);">
+        <!-- Header -->
+        <tr>
+          <td style="background:linear-gradient(135deg,#7C5CFF 0%,#4A90E2 100%);padding:32px 40px;text-align:center;">
+            <h1 style="margin:0;color:#ffffff;font-size:24px;font-weight:700;letter-spacing:-0.5px;">GoToCare</h1>
+            <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Your caregiving platform</p>
+          </td>
+        </tr>
+        <!-- Body -->
+        <tr>
+          <td style="padding:40px;">
+            <h2 style="margin:0 0 16px;color:#0f172a;font-size:22px;font-weight:700;">Hi ${firstName}! 👋</h2>
+            <p style="margin:0 0 24px;color:#475569;font-size:16px;line-height:1.6;">
+              You have a <strong>new care request</strong> waiting for you on GoToCare.
+            </p>
+            <div style="background:#f1f5f9;border-radius:12px;padding:20px 24px;margin:0 0 28px;">
+              <p style="margin:0;color:#64748b;font-size:14px;">A family is looking for care and you're a great match. Open your portal to see the details and decide if you'd like to connect.</p>
+            </div>
+            <!-- CTA Button -->
+            <div style="text-align:center;margin:0 0 28px;">
+              <a href="https://gotocare-caregiver-portal.pages.dev/?tab=requests" 
+                 style="display:inline-block;background:linear-gradient(135deg,#7C5CFF 0%,#4A90E2 100%);color:#ffffff;text-decoration:none;padding:14px 36px;border-radius:50px;font-size:16px;font-weight:600;letter-spacing:0.3px;">
+                View Care Request →
+              </a>
+            </div>
+            <p style="margin:0;color:#94a3b8;font-size:13px;text-align:center;line-height:1.5;">
+              To protect privacy, client details are revealed only after you unlock the request.<br>
+              Unlocking a single request costs just $4.99.
+            </p>
+          </td>
+        </tr>
+        <!-- Footer -->
+        <tr>
+          <td style="background:#f8fafc;padding:20px 40px;text-align:center;border-top:1px solid #e2e8f0;">
+            <p style="margin:0;color:#94a3b8;font-size:12px;">
+              © ${new Date().getFullYear()} GoToCare · 
+              <a href="https://gotocare-caregiver-portal.pages.dev" style="color:#7C5CFF;text-decoration:none;">Open Portal</a> · 
+              You're receiving this because you're a registered caregiver on GoToCare.
+            </p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
+            }),
+          })
+
+          const emailData = await emailRes.json() as any
+          if (!emailRes.ok) {
+            return Response.json({ success: false, error: emailData.message || 'Email send failed' }, { status: 500, headers })
+          }
+          return Response.json({ success: true, emailId: emailData.id }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
 
   ],
 })
