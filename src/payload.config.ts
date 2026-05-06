@@ -2526,7 +2526,7 @@ Return a JSON object with these fields:
           if (!session) return Response.json({ error: 'Session expired. Please sign in again.' }, { status: 401 })
 
           const account = await cloudflare.env.D1.prepare(
-            'SELECT id, email, name, zip_code, care_types, phone, bio, photo_url, setup_complete FROM caregiver_accounts WHERE id = ?'
+            'SELECT id, email, name, zip_code, care_types, phone, bio, photo_url, setup_complete, city, state, languages, hourly_rate, skills, certifications FROM caregiver_accounts WHERE id = ?'
           ).bind(session.account_id).first()
           if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
 
@@ -2537,13 +2537,65 @@ Return a JSON object with these fields:
               email: account.email,
               name: account.name,
               zipCode: account.zip_code || '',
-              careTypes: account.care_types ? JSON.parse(account.care_types) : [],
+              careTypes: account.care_types ? (() => { try { return JSON.parse(account.care_types) } catch { return [] } })() : [],
               phone: account.phone || '',
               bio: account.bio || '',
               photoUrl: account.photo_url || '',
               setupComplete: account.setup_complete === 1 || account.setup_complete === true,
+              city: account.city || '',
+              state: account.state || '',
+              languages: account.languages ? (() => { try { return JSON.parse(account.languages) } catch { return [] } })() : [],
+              hourlyRate: account.hourly_rate || 0,
+              skills: account.skills ? (() => { try { return JSON.parse(account.skills) } catch { return [] } })() : [],
+              certifications: account.certifications ? (() => { try { return JSON.parse(account.certifications) } catch { return [] } })() : [],
             },
           })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+
+    // ====== CAREGIVER PROFILE UPDATE (D1-backed, all fields) ======
+    {
+      path: '/caregiver-profile',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, name, phone, city, state, bio, hourlyRate, languages, skills, certifications, photoUrl } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 401 })
+
+          const session = await cloudflare.env.D1.prepare(
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first()
+          if (!session) return Response.json({ error: 'Session expired. Please sign in again.' }, { status: 401 })
+
+          const updates: string[] = []
+          const values: any[] = []
+
+          if (name !== undefined)          { updates.push('name = ?');          values.push(name) }
+          if (phone !== undefined)         { updates.push('phone = ?');         values.push(phone) }
+          if (city !== undefined)          { updates.push('city = ?');          values.push(city) }
+          if (state !== undefined)         { updates.push('state = ?');         values.push(state) }
+          if (bio !== undefined)           { updates.push('bio = ?');           values.push(bio) }
+          if (hourlyRate !== undefined)    { updates.push('hourly_rate = ?');   values.push(hourlyRate) }
+          if (languages !== undefined)     { updates.push('languages = ?');     values.push(JSON.stringify(languages)) }
+          if (skills !== undefined)        { updates.push('skills = ?');        values.push(JSON.stringify(skills)) }
+          if (certifications !== undefined){ updates.push('certifications = ?');values.push(JSON.stringify(certifications)) }
+          if (photoUrl !== undefined)      { updates.push('photo_url = ?');     values.push(photoUrl) }
+
+          if (updates.length === 0) return Response.json({ success: true, message: 'Nothing to update' })
+
+          updates.push('updated_at = CURRENT_TIMESTAMP')
+          values.push(session.account_id)
+
+          await cloudflare.env.D1.prepare(
+            `UPDATE caregiver_accounts SET ${updates.join(', ')} WHERE id = ?`
+          ).bind(...values).run()
+
+          return Response.json({ success: true, message: 'Profile updated' })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
