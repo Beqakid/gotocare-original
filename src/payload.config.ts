@@ -44,6 +44,86 @@ const cloudflare =
     ? await getCloudflareContextFromWrangler()
     : await getCloudflareContext({ async: true })
 
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// DISPATCH ENGINE — ZIP CENTROIDS + SCORING HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+const _DISPATCH_ZIP_CENTROIDS: Record<string, { lat: number; lon: number }> = {
+  '95823': { lat: 38.4895, lon: -121.4531 }, '95828': { lat: 38.4710, lon: -121.4007 },
+  '95864': { lat: 38.5765, lon: -121.3817 }, '95814': { lat: 38.5816, lon: -121.4944 },
+  '95816': { lat: 38.5682, lon: -121.4684 }, '95817': { lat: 38.5477, lon: -121.4540 },
+  '95818': { lat: 38.5658, lon: -121.5070 }, '95819': { lat: 38.5681, lon: -121.4414 },
+  '95820': { lat: 38.5348, lon: -121.4531 }, '95821': { lat: 38.6116, lon: -121.3797 },
+  '95822': { lat: 38.5197, lon: -121.4876 }, '95824': { lat: 38.5143, lon: -121.4366 },
+  '95825': { lat: 38.5790, lon: -121.4028 }, '95826': { lat: 38.5478, lon: -121.3853 },
+  '95827': { lat: 38.5506, lon: -121.3605 }, '95829': { lat: 38.4841, lon: -121.3579 },
+  '95831': { lat: 38.5013, lon: -121.5250 }, '95832': { lat: 38.4737, lon: -121.4882 },
+  '95833': { lat: 38.6128, lon: -121.4954 }, '95834': { lat: 38.6384, lon: -121.4872 },
+  '95835': { lat: 38.6715, lon: -121.4871 }, '95838': { lat: 38.6415, lon: -121.4418 },
+  '95841': { lat: 38.6410, lon: -121.3494 }, '95842': { lat: 38.6713, lon: -121.3590 },
+  '95843': { lat: 38.7003, lon: -121.3617 },
+};
+function _haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3959; const dLat = (lat2-lat1)*Math.PI/180; const dLon = (lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function _getZipDist(z1: string, z2: string): number {
+  if (z1===z2) return 0;
+  const c1=_DISPATCH_ZIP_CENTROIDS[z1]; const c2=_DISPATCH_ZIP_CENTROIDS[z2];
+  return c1&&c2 ? _haversine(c1.lat,c1.lon,c2.lat,c2.lon) : 10;
+}
+function _dispatchScore(cg: any, careType: string, dist: number): number {
+  const skills: string[] = JSON.parse(cg.skills||'[]'); const ct=careType.toLowerCase();
+  const ctMatch = skills.some((s:string)=>s.toLowerCase()===ct)?35:skills.some((s:string)=>s.toLowerCase().includes(ct.split(' ')[0]))?20:0;
+  const distScore = dist<=2?20:dist<=5?18:dist<=10?14:dist<=15?10:dist<=25?5:0;
+  const onlineScore = cg.is_online?10:3; const trustScore=Math.min(100,cg.trust_score||50)/100*10;
+  const respScore=cg.avg_response_minutes?Math.max(0,5-Math.min(5,cg.avg_response_minutes/20)):3;
+  const ratingScore=(cg.avg_rating||4.0)/5*5; const availScore=skills.length>0?12:6;
+  return Math.round(ctMatch+distScore+onlineScore+trustScore+respScore+ratingScore+availScore);
+}
+const _ROUND_DURATION_MINS=[2,3,5,10];
+async function _findDispatchCgs(db: any, zip: string, careType: string, radius: number, limit: number): Promise<any[]> {
+  const { results } = await db.prepare(`
+    SELECT ca.id,ca.name,ca.zip_code,ca.skills,ca.hourly_rate,ca.photo_url,ca.city,ca.state,
+           COALESCE(cos.is_online,0) as is_online, COALESCE(cts.score,50) as trust_score,
+           COALESCE(crm.avg_response_minutes,60) as avg_response_minutes, COALESCE(crm.avg_rating,4.0) as avg_rating
+    FROM caregiver_accounts ca
+    LEFT JOIN caregiver_online_status cos ON cos.caregiver_id=ca.id
+    LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id=ca.id
+    LEFT JOIN caregiver_response_metrics crm ON crm.caregiver_id=ca.id
+    WHERE ca.zip_code IS NOT NULL LIMIT 300
+  `).all();
+  return results.map((cg: any)=>{const d=_getZipDist(zip,cg.zip_code||'');return{...cg,distance_miles:Math.round(d*10)/10,dispatch_score:_dispatchScore(cg,careType,d)};}).filter((cg:any)=>cg.distance_miles<=radius).sort((a:any,b:any)=>b.dispatch_score-a.dispatch_score).slice(0,limit);
+}
+async function _signVAPIDJWT(endpoint: string, pubKey: string, privKeyB64: string): Promise<string> {
+  const origin=new URL(endpoint).origin;
+  const hdr=btoa(JSON.stringify({typ:'JWT',alg:'ES256'})).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  const pay=btoa(JSON.stringify({aud:origin,exp:Math.floor(Date.now()/1000)+43200,sub:'mailto:hello@carehia.com'})).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  const si=`${hdr}.${pay}`;
+  const der=Uint8Array.from(atob(privKeyB64.replace(/-/g,'+').replace(/_/g,'/')),(c:string)=>c.charCodeAt(0));
+  const ck=await crypto.subtle.importKey('pkcs8',der.buffer,{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
+  const sig=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},ck,new TextEncoder().encode(si));
+  const sb=btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  return `${si}.${sb}`;
+}
+async function _sendPushBatch(db: any, cgIds: number[], vapidPub: string, vapidPriv: string): Promise<number> {
+  if(!cgIds.length||!vapidPriv||!vapidPub) return 0;
+  const ph=cgIds.map(()=>'?').join(',');
+  const {results:subs}=await db.prepare(`SELECT * FROM push_subscriptions WHERE caregiver_id IN (${ph})`).bind(...cgIds).all();
+  let sent=0;
+  for(const sub of subs){
+    try{
+      const jwt=await _signVAPIDJWT(sub.endpoint,vapidPub,vapidPriv);
+      const r=await fetch(sub.endpoint,{method:'POST',headers:{'Authorization':`vapid t=${jwt},k=${vapidPub}`,'TTL':'86400','Content-Length':'0'}});
+      if(r.ok){sent++;await db.prepare(`UPDATE push_subscriptions SET last_used_at=datetime('now') WHERE id=?`).bind(sub.id).run();}
+      else if(r.status===410){await db.prepare(`DELETE FROM push_subscriptions WHERE id=?`).bind(sub.id).run();}
+    }catch(_){}
+  }
+  return sent;
+}
+
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -4407,5 +4487,313 @@ Return a JSON object with these fields:
     },
 
 
+
+    // ====== PHASE 1A: CARE REQUEST DISPATCH ======
+    {
+      path: '/care-request',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers })
+        try {
+          const body = await req.json()
+          const { care_type, care_types, description, zip_code, city, state, start_date, start_time, duration_hours, pay_rate, client_email, client_id } = body
+          if (!care_type || !zip_code) return Response.json({ error: 'care_type and zip_code required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const env = (cloudflare as any).env
+          const insert = await db.prepare(`INSERT INTO care_requests (client_id,client_email,care_type,care_types,description,zip_code,city,state,start_date,start_time,duration_hours,pay_rate,status,round_1_sent_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'dispatching',datetime('now'),datetime('now')) RETURNING id`).bind(client_id||null,client_email||null,care_type,JSON.stringify(care_types||[care_type]),description||'',zip_code,city||'',state||'',start_date||'',start_time||'',duration_hours||null,pay_rate||25).all()
+          const requestId = insert.results[0]?.id
+          if (!requestId) return Response.json({ error: 'Failed to create request' }, { status: 500, headers })
+          const caregivers = await _findDispatchCgs(db, zip_code, care_type, 5, 10)
+          for (const cg of caregivers) { await db.prepare(`INSERT OR IGNORE INTO dispatch_notifications (request_id,caregiver_id,round,status,dispatch_score,distance_miles) VALUES (?,?,1,'sent',?,?)`).bind(requestId,cg.id,cg.dispatch_score,cg.distance_miles).run() }
+          await db.prepare(`UPDATE care_requests SET caregivers_notified=? WHERE id=?`).bind(caregivers.length, requestId).run()
+          const pushSent = await _sendPushBatch(db, caregivers.map((c:any)=>c.id), env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY)
+          const { results: ms } = await db.prepare(`SELECT COUNT(*) as cnt FROM booking_milestones`).all()
+          const bn = ((ms[0] as any)?.cnt||0)+1
+          await db.prepare(`INSERT INTO booking_milestones (request_id,booking_number,zip_code,care_type,client_id,caregivers_notified,request_created_at,first_notification_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))`).bind(requestId,bn,zip_code,care_type,client_id||null,caregivers.length).run()
+          return Response.json({ success:true, request_id:requestId, booking_number:bn, caregivers_notified:caregivers.length, push_sent:pushSent, round:1, message:`Found ${caregivers.length} caregivers near you. Notifying them now.` }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CARE REQUEST STATUS (CLIENT POLLS) ======
+    {
+      path: '/care-request-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url||'', 'http://x'); const requestId = url.searchParams.get('id')
+          if (!requestId) return Response.json({ error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1; const env = (cloudflare as any).env
+          const { results } = await db.prepare(`SELECT * FROM care_requests WHERE id=?`).bind(requestId).all()
+          const request = (results as any[])[0]; if (!request) return Response.json({ error: 'Not found' }, { status: 404, headers })
+          const { results: notifs } = await db.prepare(`SELECT status,COUNT(*) as cnt FROM dispatch_notifications WHERE request_id=? GROUP BY status`).bind(requestId).all()
+          const byStatus: any = {}; (notifs as any[]).forEach((n:any)=>{ byStatus[n.status]=n.cnt })
+          const viewing = byStatus['viewed']||0; const now = Date.now()
+          const elapsedMins = (now - new Date(request.created_at).getTime())/60000
+          let progressMessage = 'Finding caregivers near you'; let progressStep = 1
+          if (request.status==='accepted') { progressMessage='A caregiver accepted your request!'; progressStep=4 }
+          else if (viewing>0) { progressMessage=`${viewing} caregiver${viewing>1?'s are':' is'} reviewing your request`; progressStep=3 }
+          else if (request.caregivers_notified>0) {
+            progressMessage=`Notified ${request.caregivers_notified} caregivers`; progressStep=2
+            if (elapsedMins>5) { progressMessage='Still searching — expanding search radius'; progressStep=5 }
+          }
+          // Advance round if needed
+          const roundFields=['round_1_sent_at','round_2_sent_at','round_3_sent_at','round_4_sent_at']
+          const roundConfigs=[{afterMins:0,radius:5,limit:10},{afterMins:2,radius:10,limit:15},{afterMins:5,radius:15,limit:25},{afterMins:10,radius:25,limit:50}]
+          if (request.status==='dispatching') {
+            for (let r=1;r<4;r++) {
+              const prevSent=(request as any)[roundFields[r-1]]; const thisSent=(request as any)[roundFields[r]]
+              if (prevSent&&!thisSent&&(now-new Date(prevSent).getTime())/60000>=roundConfigs[r].afterMins) {
+                const newCgs=await _findDispatchCgs(db,request.zip_code,request.care_type,roundConfigs[r].radius,roundConfigs[r].limit)
+                const {results:ex}=await db.prepare(`SELECT caregiver_id FROM dispatch_notifications WHERE request_id=?`).bind(requestId).all()
+                const exIds=new Set((ex as any[]).map((n:any)=>n.caregiver_id))
+                const newOnly=newCgs.filter((cg:any)=>!exIds.has(cg.id))
+                for(const cg of newOnly){await db.prepare(`INSERT OR IGNORE INTO dispatch_notifications (request_id,caregiver_id,round,status,dispatch_score,distance_miles) VALUES (?,?,?,'sent',?,?)`).bind(requestId,cg.id,r+1,cg.dispatch_score,cg.distance_miles).run()}
+                await db.prepare(`UPDATE care_requests SET current_round=?,${roundFields[r]}=datetime('now'),caregivers_notified=caregivers_notified+? WHERE id=?`).bind(r+1,newOnly.length,requestId).run()
+                await _sendPushBatch(db,newOnly.map((c:any)=>c.id),env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY); break
+              }
+            }
+          }
+          let acceptedCaregiver = null
+          if (request.accepted_caregiver_id) {
+            const {results:cgs}=await db.prepare(`SELECT id,name,photo_url,hourly_rate,city FROM caregiver_accounts WHERE id=?`).bind(request.accepted_caregiver_id).all()
+            acceptedCaregiver=(cgs as any[])[0]||null
+          }
+          return Response.json({ request_id:request.id, status:request.status, current_round:request.current_round||1, caregivers_notified:request.caregivers_notified, caregivers_viewing:viewing, caregivers_declined:byStatus['declined']||0, progress_message:progressMessage, progress_step:progressStep, accepted_caregiver:acceptedCaregiver, created_at:request.created_at, accepted_at:request.accepted_at }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CAREGIVER LIVE REQUESTS (CAREGIVER POLLS) ======
+    {
+      path: '/caregiver-live-requests',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url||'','http://x'); const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:cgRows}=await db.prepare(`SELECT * FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
+          const cg=(cgRows as any[])[0]; if(!cg) return Response.json({ error:'Not found' }, { status:404, headers })
+          await db.prepare(`UPDATE dispatch_notifications SET status='viewed',viewed_at=datetime('now') WHERE caregiver_id=? AND status='sent'`).bind(caregiverId).run()
+          await db.prepare(`INSERT OR REPLACE INTO caregiver_online_status (caregiver_id,is_online,zip_code,last_seen,updated_at) VALUES (?,1,?,datetime('now'),datetime('now'))`).bind(caregiverId,cg.zip_code||'').run()
+          const {results:dispatches}=await db.prepare(`
+            SELECT dn.id as dispatch_id,dn.request_id,dn.round,dn.status as dispatch_status,dn.dispatch_score,dn.distance_miles,dn.sent_at,
+                   cr.care_type,cr.description,cr.zip_code,cr.city,cr.state,cr.start_date,cr.start_time,cr.duration_hours,
+                   cr.pay_rate,cr.status as request_status,cr.created_at,cr.current_round,cr.round_1_sent_at,cr.round_2_sent_at,cr.round_3_sent_at,cr.round_4_sent_at,cr.accepted_caregiver_id
+            FROM dispatch_notifications dn JOIN care_requests cr ON cr.id=dn.request_id
+            WHERE dn.caregiver_id=? AND cr.status IN ('pending','dispatching') AND dn.status NOT IN ('declined','expired')
+            ORDER BY cr.created_at DESC LIMIT 20
+          `).bind(caregiverId).all()
+          const enriched=(dispatches as any[]).map((d:any)=>{
+            const ri=(d.current_round||1)-1
+            const rsf=[d.round_1_sent_at,d.round_2_sent_at,d.round_3_sent_at,d.round_4_sent_at]
+            const expiresAt=rsf[ri]?new Date(rsf[ri]).getTime()+(_ROUND_DURATION_MINS[ri]||2)*60000:Date.now()+120000
+            const remaining=expiresAt-Date.now(); const taken=d.accepted_caregiver_id&&d.accepted_caregiver_id!==caregiverId
+            return {dispatch_id:d.dispatch_id,request_id:d.request_id,care_type:d.care_type,description:d.description||'',zip_code:d.zip_code,city:d.city,distance_miles:d.distance_miles,pay_rate:d.pay_rate,start_date:d.start_date,start_time:d.start_time,duration_hours:d.duration_hours,dispatch_score:d.dispatch_score,round:d.current_round,request_status:taken?'taken':remaining<=0?'expired':d.request_status,expires_at:new Date(expiresAt).toISOString(),expires_in_ms:Math.max(0,remaining),is_expired:remaining<=0||taken,sent_at:d.sent_at}
+          })
+          return Response.json({ requests:enriched, count:enriched.length }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== DISPATCH ACCEPT (ATOMIC FIRST-ACCEPT-WINS) ======
+    {
+      path: '/dispatch-accept',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, request_id } = body
+          if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:dn}=await db.prepare(`SELECT * FROM dispatch_notifications WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).all()
+          if (!(dn as any[])[0]) return Response.json({ error: 'Not dispatched to you' }, { status: 403, headers })
+          const result=await db.prepare(`UPDATE care_requests SET status='accepted',accepted_caregiver_id=?,accepted_at=datetime('now') WHERE id=? AND status IN ('pending','dispatching')`).bind(caregiverId,request_id).run()
+          if (result.meta.changes===0) {
+            const {results:ex}=await db.prepare(`SELECT accepted_caregiver_id FROM care_requests WHERE id=?`).bind(request_id).all()
+            if ((ex as any[])[0]?.accepted_caregiver_id===caregiverId) return Response.json({ success:true, message:'You already accepted this booking.' }, { headers })
+            return Response.json({ error:'This booking has already been accepted by another caregiver.',taken:true }, { status: 409, headers })
+          }
+          await db.prepare(`UPDATE dispatch_notifications SET status='accepted',responded_at=datetime('now') WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).run()
+          await db.prepare(`UPDATE dispatch_notifications SET status='expired' WHERE request_id=? AND caregiver_id!=?`).bind(request_id,caregiverId).run()
+          const {results:crRow}=await db.prepare(`SELECT * FROM care_requests WHERE id=?`).bind(request_id).all()
+          const cr=(crRow as any[])[0]
+          if (cr) {
+            const secs=Math.round((Date.now()-new Date(cr.created_at).getTime())/1000)
+            await db.prepare(`UPDATE booking_milestones SET caregiver_id=?,accepted_at=datetime('now'),time_to_accept_seconds=? WHERE request_id=?`).bind(caregiverId,secs,request_id).run()
+          }
+          await db.prepare(`INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,avg_response_minutes,updated_at) VALUES (?,1,1,5,datetime('now')) ON CONFLICT(caregiver_id) DO UPDATE SET total_requests=total_requests+1,accepted=accepted+1,updated_at=datetime('now')`).bind(caregiverId).run()
+          return Response.json({ success:true, message:'Booking accepted! View the details below.', request:{ id:cr?.id, care_type:cr?.care_type, zip_code:cr?.zip_code, city:cr?.city, start_date:cr?.start_date, start_time:cr?.start_time, pay_rate:cr?.pay_rate } }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== DISPATCH DECLINE ======
+    {
+      path: '/dispatch-decline',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, request_id } = body
+          if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          await db.prepare(`UPDATE dispatch_notifications SET status='declined',responded_at=datetime('now') WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).run()
+          await db.prepare(`UPDATE care_requests SET caregivers_declined=caregivers_declined+1 WHERE id=?`).bind(request_id).run()
+          await db.prepare(`INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,avg_response_minutes,updated_at) VALUES (?,1,0,5,datetime('now')) ON CONFLICT(caregiver_id) DO UPDATE SET total_requests=total_requests+1,updated_at=datetime('now')`).bind(caregiverId).run()
+          return Response.json({ success:true, message:'Request passed.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CAREGIVER ONLINE STATUS ======
+    {
+      path: '/caregiver-online-status',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, is_online } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:cgRows}=await db.prepare(`SELECT zip_code FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
+          const zip=(cgRows as any[])[0]?.zip_code||''
+          await db.prepare(`INSERT OR REPLACE INTO caregiver_online_status (caregiver_id,is_online,zip_code,last_seen,updated_at) VALUES (?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,is_online?1:0,zip).run()
+          return Response.json({ success:true, is_online:!!is_online }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH SUBSCRIBE ======
+    {
+      path: '/push-subscribe',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, endpoint, p256dh, auth, user_agent } = body
+          if (!token||!endpoint) return Response.json({ error: 'token and endpoint required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          await db.prepare(`INSERT OR REPLACE INTO push_subscriptions (caregiver_id,endpoint,p256dh,auth,user_agent,created_at,last_used_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,endpoint,p256dh||null,auth||null,user_agent||null).run()
+          return Response.json({ success:true, message:'Push subscription saved.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH UNSUBSCRIBE ======
+    {
+      path: '/push-unsubscribe',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          await db.prepare(`DELETE FROM push_subscriptions WHERE caregiver_id=?`).bind((sess as any[])[0].caregiver_id).run()
+          return Response.json({ success:true }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH TEST ======
+    {
+      path: '/push-test',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1; const env = (cloudflare as any).env
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const sent=await _sendPushBatch(db,[caregiverId],env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY)
+          return Response.json({ success:true, sent, message:sent>0?'Test notification sent!':'No push subscription found. Enable notifications first.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== ADMIN LAUNCH METRICS ======
+    {
+      path: '/admin-launch-metrics',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        const url = new URL(req.url||'','http://x'); const adminKey=url.searchParams.get('key')
+        if (adminKey!=='carehia_launch_2026') return Response.json({ error:'Unauthorized' }, { status:401, headers })
+        try {
+          const db = (cloudflare as any).env.D1
+          const TARGET_ZIPS = ['95823','95828','95864']
+          const zipMetrics: any[] = []
+          for (const zip of TARGET_ZIPS) {
+            const {results:t}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts WHERE zip_code=?`).bind(zip).all()
+            const {results:o}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_online_status WHERE zip_code=? AND is_online=1`).bind(zip).all()
+            const {results:p}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts WHERE zip_code=? AND skills IS NOT NULL AND bio IS NOT NULL AND photo_url IS NOT NULL`).bind(zip).all()
+            const {results:pu}=await db.prepare(`SELECT COUNT(DISTINCT ps.caregiver_id) as cnt FROM push_subscriptions ps JOIN caregiver_accounts ca ON ca.id=ps.caregiver_id WHERE ca.zip_code=?`).bind(zip).all()
+            const {results:tv}=await db.prepare(`SELECT COUNT(DISTINCT cts.caregiver_id) as cnt FROM caregiver_trust_scores cts JOIN caregiver_accounts ca ON ca.id=cts.caregiver_id WHERE ca.zip_code=? AND cts.score>=60`).bind(zip).all()
+            const tc=(t[0] as any)?.cnt||0,oc=(o[0] as any)?.cnt||0,pc=(p[0] as any)?.cnt||0,puc=(pu[0] as any)?.cnt||0,tvc=(tv[0] as any)?.cnt||0
+            const lr=tc>=30&&pc>=15&&oc>=10&&puc>=8; const bs=tc>=10&&pc>=5
+            zipMetrics.push({ zip, city:zip==='95823'?'Sacramento (South)':zip==='95828'?'Sacramento (SE)':'Sacramento (NE)', total_caregivers:tc, online_caregivers:oc, profile_complete:pc, push_enabled:puc, trust_verified:tvc, launch_status:lr?'Launch Ready ✅':bs?'Building Supply 🔄':'Weak Supply ⚠️', launch_ready:lr })
+          }
+          const {results:tc2}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts`).all()
+          const {results:to}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_online_status WHERE is_online=1`).all()
+          const {results:tr}=await db.prepare(`SELECT COUNT(*) as cnt FROM care_requests`).all()
+          const {results:ta}=await db.prepare(`SELECT COUNT(*) as cnt FROM care_requests WHERE status='accepted'`).all()
+          const {results:ar}=await db.prepare(`SELECT AVG(time_to_accept_seconds) as avg FROM booking_milestones WHERE time_to_accept_seconds>0`).all()
+          return Response.json({ target_zips:zipMetrics, overall:{ total_caregivers:(tc2[0] as any)?.cnt||0, online_caregivers:(to[0] as any)?.cnt||0, total_requests:(tr[0] as any)?.cnt||0, accepted_requests:(ta[0] as any)?.cnt||0, avg_response_seconds:Math.round((ar[0] as any)?.avg||0) }, thresholds:{total:30,profile_complete:15,online:10,push_enabled:8}, generated_at:new Date().toISOString() }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== ADMIN FIRST 20 BOOKINGS ======
+    {
+      path: '/admin-first-20',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        const url = new URL(req.url||'','http://x'); const adminKey=url.searchParams.get('key')
+        if (adminKey!=='carehia_launch_2026') return Response.json({ error:'Unauthorized' }, { status:401, headers })
+        try {
+          const db = (cloudflare as any).env.D1
+          const {results:ms}=await db.prepare(`SELECT * FROM booking_milestones ORDER BY booking_number ASC LIMIT 20`).all()
+          const {results:s}=await db.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN accepted_at IS NOT NULL THEN 1 ELSE 0 END) as accepted, SUM(booking_completed) as completed, AVG(CASE WHEN time_to_accept_seconds>0 THEN time_to_accept_seconds END) as avg_time, SUM(review_left) as reviews, SUM(client_rebooked) as rebooked FROM booking_milestones`).all()
+          const sum=(s[0] as any)||{}; const total=sum.total||0; const accepted=sum.accepted||0
+          return Response.json({
+            bookings:ms, summary:{ total_created:total, total_accepted:accepted, total_completed:sum.completed||0, acceptance_rate:total>0?Math.round((accepted/total)*100):0, avg_time_to_accept_secs:Math.round(sum.avg_time||0), review_rate:accepted>0?Math.round(((sum.reviews||0)/accepted)*100):0, repeat_booking_rate:accepted>0?Math.round(((sum.rebooked||0)/accepted)*100):0 },
+            milestones:[{goal:1,reached:total>=1,label:'🎉 First Booking!'},{goal:5,reached:total>=5,label:'🚀 5 Bookings'},{goal:10,reached:total>=10,label:'🔥 10 Bookings'},{goal:20,reached:total>=20,label:'🏆 20 Bookings — Goal Reached!'}],
+            goal_message:'Goal: Complete first 20 bookings in the launch ZIPs.',generated_at:new Date().toISOString()
+          }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
   ],
 })
