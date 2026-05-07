@@ -3555,13 +3555,13 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ timer: null }, { headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const timerSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ timer: null }, { headers })
+          if (!timerSession) return Response.json({ timer: null }, { headers })
           const row = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_active_timer WHERE caregiver_id = ?'
-          ).bind(session.account_id).first() as any
+            'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
+          ).bind(timerSession.email).first() as any
           if (!row) return Response.json({ timer: null }, { headers })
           return Response.json({ timer: JSON.parse(row.timer_json || 'null') }, { headers })
         } catch (error) {
@@ -3583,11 +3583,11 @@ Return a JSON object with these fields:
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           if (timer === null) {
-            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_id = ?').bind(session.account_id).run()
+            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerSession.email).run()
           } else {
             await cloudflare.env.D1.prepare(
-              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_id, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
-            ).bind(session.account_id, JSON.stringify(timer)).run()
+              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
+            ).bind(timerSession.email, JSON.stringify(timer)).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
