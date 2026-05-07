@@ -4023,18 +4023,27 @@ Return a JSON object with these fields:
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
           const url = new URL(req.url)
-          const id = url.searchParams.get('id')
+          let id = url.searchParams.get('id')
           if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          // Support slug format like "john-doe-3" — extract last numeric part
+          if (isNaN(Number(id))) {
+            const parts = id.split('-')
+            for (let i = parts.length - 1; i >= 0; i--) {
+              if (/^\d+$/.test(parts[i])) { id = parts[i]; break }
+            }
+          }
           const db = (cloudflare as any).env.D1
           const result = await db.prepare(
-            'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
-          ).bind(parseInt(id)).first()
+            'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, languages, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
+          ).bind(parseInt(id as string)).first()
           if (!result) return Response.json({ success: false, error: 'Profile not found' }, { status: 404, headers })
           let skills = []
           let certifications = []
+          let languages = []
           try { skills = JSON.parse((result as any).skills || '[]') } catch {}
           try { certifications = JSON.parse((result as any).certifications || '[]') } catch {}
-          return Response.json({ success: true, profile: { ...(result as any), skills, certifications } }, { headers })
+          try { languages = JSON.parse((result as any).languages || '[]') } catch {}
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, languages } }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
