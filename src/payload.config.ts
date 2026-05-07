@@ -3682,16 +3682,17 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_private_clients WHERE caregiver_id = ? ORDER BY name ASC'
-          ).bind(session.account_id).all()
+            'SELECT * FROM caregiver_private_clients WHERE caregiver_email = ? ORDER BY name ASC'
+          ).bind(session.caregiver_email).all()
           const clients = (result.results || []).map((c: any) => ({
             id: 'cloud_' + c.id,
             cloudId: String(c.id),
             name: c.name,
+            email: c.email || '',
             phone: c.phone || '',
             hourlyRate: c.hourly_rate || 0,
             careType: c.care_type || '',
@@ -3715,14 +3716,14 @@ Return a JSON object with these fields:
           const { token, client } = body
           if (!token || !client) return Response.json({ success: false, error: 'token and client required' }, { status: 400, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const r = await cloudflare.env.D1.prepare(
-            'INSERT INTO caregiver_private_clients (caregiver_id, name, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
-            session.account_id, client.name || '', client.phone || '',
-            client.hourlyRate || 0, client.careType || '',
+            session.caregiver_email, client.name || '', client.email || '',
+            client.phone || '', client.hourlyRate || 0, client.careType || '',
             client.billingType || 'hourly', client.otAfterHrs || 8, client.otMultiplier || 1.5
           ).run() as any
           return Response.json({ success: true, cloudId: String(r.meta?.last_row_id || r.lastRowId || '') }, { headers })
@@ -3742,12 +3743,12 @@ Return a JSON object with these fields:
           const cloudId = url.searchParams.get('cloudId') || ''
           if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           await cloudflare.env.D1.prepare(
-            'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(cloudId), session.account_id).run()
+            'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_email = ?'
+          ).bind(Number(cloudId), session.caregiver_email).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
