@@ -3425,13 +3425,13 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_time_entries WHERE caregiver_id = ? ORDER BY date DESC, created_at DESC LIMIT 200'
-          ).bind(session.account_id).all()
+            'SELECT * FROM caregiver_time_entries WHERE caregiver_email = ? ORDER BY date DESC, created_at DESC LIMIT 200'
+          ).bind(sessionRow.email).all()
           const entries = (result.results || []).map((e: any) => ({
             id: 'cloud_' + e.id,
             cloudId: String(e.id),
@@ -3439,7 +3439,7 @@ Return a JSON object with these fields:
             date: e.date,
             startTime: e.start_time,
             endTime: e.end_time,
-            duration: e.duration_minutes,
+            duration: e.duration_mins,
             status: e.status || 'completed',
             hourlyRate: e.hourly_rate,
             totalPay: e.total_pay,
@@ -3468,16 +3468,16 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, entry } = body
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow2 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow2) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const r = await cloudflare.env.D1.prepare(
             `INSERT INTO caregiver_time_entries 
-             (caregiver_id, client_name, date, start_time, end_time, duration_minutes, status, hourly_rate, total_pay, regular_hours, overtime_hours, regular_pay, overtime_pay, billing_type, ot_after_hrs, ot_multiplier, notes)
+             (caregiver_email, client_name, date, start_time, end_time, duration_mins, status, hourly_rate, total_pay, regular_hours, overtime_hours, regular_pay, overtime_pay, billing_type, ot_after_hrs, ot_multiplier, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
-            session.account_id,
+            sessionRow2.email,
             entry.clientName || '', entry.date || '', entry.startTime || '', entry.endTime || '',
             entry.duration || 0, entry.status || 'completed',
             entry.hourlyRate || 0, entry.totalPay || 0,
@@ -3502,13 +3502,13 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           const cloudId = url.searchParams.get('cloudId') || ''
           if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow3 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow3) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           await cloudflare.env.D1.prepare(
-            'DELETE FROM caregiver_time_entries WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(cloudId), session.account_id).run()
+            'DELETE FROM caregiver_time_entries WHERE id = ? AND caregiver_email = ?'
+          ).bind(Number(cloudId), sessionRow3.email).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -3528,15 +3528,15 @@ Return a JSON object with these fields:
           if (!token || !Array.isArray(cloudIds) || cloudIds.length === 0) {
             return Response.json({ success: false, error: 'token and cloudIds required' }, { status: 400, headers })
           }
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow4 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow4) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           // Mark each entry as invoiced (only if owned by this caregiver)
           for (const cloudId of cloudIds) {
             await cloudflare.env.D1.prepare(
-              'UPDATE caregiver_time_entries SET is_invoiced = 1 WHERE id = ? AND caregiver_id = ?'
-            ).bind(Number(cloudId), session.account_id).run()
+              'UPDATE caregiver_time_entries SET is_invoiced = 1 WHERE id = ? AND caregiver_email = ?'
+            ).bind(Number(cloudId), sessionRow4.email).run()
           }
           return Response.json({ success: true, marked: cloudIds.length }, { headers })
         } catch (error) {
