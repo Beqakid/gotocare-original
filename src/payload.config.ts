@@ -4795,5 +4795,67 @@ Return a JSON object with these fields:
         } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
       },
     },
+
+    // ====== CLIENT ONSITE CAREGIVER TRACKER ======
+    {
+      path: '/client-onsite-caregiver',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url || '', 'http://x')
+          const clientToken = url.searchParams.get('clientToken')
+          if (!clientToken) return Response.json({ active: false, error: 'clientToken required' }, { status: 400, headers })
+
+          const db = (cloudflare as any).env.D1
+
+          // Validate token — check client_sessions
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(clientToken).first() as any
+
+          if (!session) return Response.json({ active: false, error: 'Invalid or expired token' }, { status: 401, headers })
+
+          const clientEmail = session.client_email
+
+          // Get caregivers on this client's team
+          const teamResult = await db.prepare(
+            "SELECT caregiver_id FROM client_team WHERE client_email = ? AND status = 'active'"
+          ).bind(clientEmail.toLowerCase()).all()
+
+          const caregiverIds: number[] = ((teamResult.results || []) as any[]).map((r: any) => r.caregiver_id)
+
+          if (!caregiverIds.length) {
+            return Response.json({ active: false, message: 'No caregivers on team' }, { headers })
+          }
+
+          // Find any caregiver on team who has an active timer running
+          // caregiver_active_timer uses caregiver_email — join via caregiver_accounts
+          const ph = caregiverIds.map(() => '?').join(',')
+          const timerRow = await db.prepare(
+            `SELECT cat.start_time, cat.client_name, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
+             FROM caregiver_active_timer cat
+             JOIN caregiver_accounts ca ON ca.email = cat.caregiver_email
+             WHERE ca.id IN (${ph})
+             ORDER BY cat.start_time DESC LIMIT 1`
+          ).bind(...caregiverIds).first() as any
+
+          if (!timerRow) {
+            return Response.json({ active: false, message: 'No caregiver currently onsite' }, { headers })
+          }
+
+          return Response.json({
+            active: true,
+            caregiver_name: timerRow.caregiver_name || 'Caregiver',
+            caregiver_id: timerRow.caregiver_id,
+            photo_url: timerRow.photo_url || null,
+            start_time: timerRow.start_time,
+            client_name: timerRow.client_name || '',
+          }, { headers })
+        } catch (error) {
+          return Response.json({ active: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
   ],
 })
