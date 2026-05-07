@@ -4857,5 +4857,128 @@ Return a JSON object with these fields:
         }
       },
     },
+
+    // ====== CLIENT PREFERENCES (save/load zip + care needs) ======
+    {
+      path: '/client-preferences',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          // Validate session
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
+          // Get zip + care_types from client_accounts
+          const client = await db.prepare(
+            'SELECT zip, care_types, name FROM client_accounts WHERE email = ?'
+          ).bind(session.client_email).first() as any
+          if (!client) return Response.json({ zip: null, careNeeds: [], headers })
+          return Response.json({
+            success: true,
+            zip: client.zip || null,
+            careNeeds: client.care_types ? JSON.parse(client.care_types) : [],
+            name: client.name || '',
+          }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-preferences',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          const body = await req.json()
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
+          const { zip, careNeeds } = body
+          await db.prepare(
+            'UPDATE client_accounts SET zip = ?, care_types = ? WHERE email = ?'
+          ).bind(zip || null, careNeeds ? JSON.stringify(careNeeds) : null, session.client_email).run()
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CLIENT SHORTLIST (persist across sessions) ======
+    {
+      path: '/client-shortlist',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ items: [] }, { headers })
+          const result = await db.prepare(
+            'SELECT caregiver_id, caregiver_data, saved_at FROM client_shortlist WHERE client_email = ? ORDER BY saved_at DESC'
+          ).bind(session.client_email).all()
+          const items = (result.results || []).map((r: any) => ({
+            caregiverId: r.caregiver_id,
+            savedAt: r.saved_at,
+            data: r.caregiver_data ? JSON.parse(r.caregiver_data) : null,
+          }))
+          return Response.json({ success: true, items }, { headers })
+        } catch (error) {
+          return Response.json({ items: [], error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-shortlist',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          const body = await req.json()
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Not authenticated' }, { status: 401, headers })
+          const { action, caregiverId, caregiverData } = body
+          if (action === 'add') {
+            await db.prepare(
+              'INSERT OR REPLACE INTO client_shortlist (client_email, caregiver_id, caregiver_data) VALUES (?, ?, ?)'
+            ).bind(session.client_email, String(caregiverId), caregiverData ? JSON.stringify(caregiverData) : null).run()
+          } else if (action === 'remove') {
+            await db.prepare(
+              'DELETE FROM client_shortlist WHERE client_email = ? AND caregiver_id = ?'
+            ).bind(session.client_email, String(caregiverId)).run()
+          } else if (action === 'clear') {
+            await db.prepare(
+              'DELETE FROM client_shortlist WHERE client_email = ?'
+            ).bind(session.client_email).run()
+          }
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
   ],
 })
