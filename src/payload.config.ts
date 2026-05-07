@@ -4152,5 +4152,260 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ====== TRUST STATUS (get full trust data for logged-in caregiver) ======
+    {
+      path: '/trust-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
+          const idVerif = await db.prepare('SELECT status, doc_type, submitted_at FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY id DESC LIMIT 1').bind(cgId).first()
+          const bgCheck = await db.prepare('SELECT status, initiated_at, completed_at, expires_at FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
+          const certRows = await db.prepare("SELECT doc_type as name, status, notes FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha','lvn','rn','dementia','hospice','tb')").bind(cgId).all()
+          const certifications = (certRows.results || []).map((c) => ({ name: (c as any).name?.toUpperCase() || '', status: (c as any).status || 'pending', expiry: (c as any).notes?.replace('Expires: ','') || '' }))
+          const reviewRows = await db.prepare('SELECT id, rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 10').bind(cgId).all()
+          const reviews = reviewRows.results || []
+          const reviewCount = reviews.length
+          const avgRating = reviewCount > 0 ? (reviews as any[]).reduce((s, r) => s + (r.rating || 0), 0) / reviewCount : 0
+          const metrics = await db.prepare('SELECT avg_response_minutes, total_requests, accepted, completed_shifts, repeat_bookings FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          const bookingCount = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status = 'accepted'").bind(String(cgId)).first()
+          const cgData = cg as any
+          let skills = []; try { skills = JSON.parse(cgData?.skills || '[]') } catch {}
+          const profileComplete = !!(cgData?.bio && cgData?.photo_url && cgData?.hourly_rate && skills.length > 0)
+          const idVerified = (idVerif as any)?.status === 'verified'
+          const bgChecked = (bgCheck as any)?.status === 'verified'
+          const hasCPR = certifications.some(c => c.name === 'CPR' && c.status === 'verified')
+          const hasCNA = certifications.some(c => ['CNA','HHA'].includes(c.name) && c.status === 'verified')
+          const shifts5plus = ((bookingCount as any)?.cnt || 0) >= 5
+          const fastResponder = (metrics as any)?.avg_response_minutes > 0 && (metrics as any)?.avg_response_minutes <= 5
+          const repeatClients = ((metrics as any)?.repeat_bookings || 0) >= 3
+          const fiveStarAvg = avgRating >= 4.9 && reviewCount >= 3
+          const score = (idVerified?20:0)+(bgChecked?20:0)+(hasCPR?15:0)+(hasCNA?10:0)+(profileComplete?10:0)+(shifts5plus?10:0)+(fastResponder?5:0)+(repeatClients?5:0)+(fiveStarAvg?5:0)
+          const level = score>=90?'Elite Caregiver':score>=70?'Verified Pro':score>=40?'Trusted':'Basic'
+          return Response.json({ success: true, score, level, breakdown: { id_verified: idVerified, background_checked: bgChecked, cpr_certified: hasCPR, cna_verified: hasCNA, profile_complete: profileComplete, shifts_5plus: shifts5plus, fast_responder: fastResponder, repeat_clients: repeatClients, five_star_avg: fiveStarAvg }, idVerification: idVerif || null, backgroundCheck: bgCheck || null, certifications, reviews, reviewCount, avgRating: Math.round(avgRating*10)/10, metrics: metrics || null }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== PUBLIC TRUST SCORE ======
+    {
+      path: '/trust-score',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const cgId = parseInt(id)
+          const idVerif = await db.prepare('SELECT status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN (?) ORDER BY id DESC LIMIT 1').bind(cgId, 'drivers_license,state_id,passport').first()
+          const bgCheck = await db.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
+          const certRows = await db.prepare("SELECT doc_type as name, status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha')").bind(cgId).all()
+          const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
+          const reviewAgg = await db.prepare('SELECT COUNT(*) as cnt, AVG(rating) as avg FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1').bind(cgId).first()
+          const bookingCount = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status = 'accepted'").bind(String(cgId)).first()
+          const metrics = await db.prepare('SELECT avg_response_minutes, repeat_bookings FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          const cgData = cg as any; let skills = []; try { skills = JSON.parse(cgData?.skills||'[]') } catch {}
+          const profileComplete = !!(cgData?.bio && cgData?.photo_url && cgData?.hourly_rate && skills.length>0)
+          const certs = certRows.results || []
+          const hasCPR = (certs as any[]).some(c => c.name==='cpr' && c.status==='verified')
+          const hasCNA = (certs as any[]).some(c => ['cna','hha'].includes(c.name) && c.status==='verified')
+          const ra = reviewAgg as any; const bk = bookingCount as any; const mt = metrics as any
+          const score = ((idVerif as any)?.status==='verified'?20:0)+((bgCheck as any)?.status==='verified'?20:0)+(hasCPR?15:0)+(hasCNA?10:0)+(profileComplete?10:0)+((bk?.cnt||0)>=5?10:0)+(mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0?5:0)+((mt?.repeat_bookings||0)>=3?5:0)+((ra?.avg||0)>=4.9&&(ra?.cnt||0)>=3?5:0)
+          const level = score>=90?'Elite Caregiver':score>=70?'Verified Pro':score>=40?'Trusted':'Basic'
+          return Response.json({ success: true, score, level, idVerified: (idVerif as any)?.status==='verified', backgroundChecked: (bgCheck as any)?.status==='verified', hasCPR, hasCNA, reviewCount: ra?.cnt||0, avgRating: Math.round((ra?.avg||0)*10)/10, fastResponder: mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0 }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== INITIATE BACKGROUND CHECK ======
+    {
+      path: '/trust-background',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const now = new Date().toISOString()
+          const exp = new Date(Date.now() + 365*24*3600*1000).toISOString()
+          await db.prepare('INSERT OR REPLACE INTO caregiver_background_checks (caregiver_id, status, provider, initiated_at, expires_at) VALUES (?, ?, ?, ?, ?)').bind(cgId, 'pending', 'manual_review', now, exp).run()
+          return Response.json({ success: true, status: 'pending', message: 'Background check initiated. Our team will contact you within 1-2 business days.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== UPLOAD ID VERIFICATION ======
+    {
+      path: '/trust-id-upload',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const formData = await req.formData()
+          const file = formData.get('file')
+          const docType = formData.get('doc_type') || 'id_document'
+          let frontUrl = ''
+          if (file && (file as File).size) {
+            const r2 = (cloudflare as any).env.R2
+            const f = file as File
+            const key = `caregiver-id/${cgId}/${docType}-${Date.now()}-${f.name}`
+            await r2.put(key, await f.arrayBuffer(), { httpMetadata: { contentType: f.type } })
+            frontUrl = key
+          }
+          const now = new Date().toISOString()
+          await db.prepare('INSERT OR REPLACE INTO caregiver_verifications (caregiver_id, doc_type, front_url, status, submitted_at) VALUES (?, ?, ?, ?, ?)').bind(cgId, docType, frontUrl, 'pending', now).run()
+          return Response.json({ success: true, status: 'pending', message: 'ID submitted for review.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== ADD CERTIFICATION ======
+    {
+      path: '/trust-certification',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const formData = await req.formData()
+          const certType = formData.get('cert_type') || 'other'
+          const expiry = formData.get('expiry') || ''
+          const file = formData.get('file')
+          let fileUrl = ''
+          if (file && (file as File).size) {
+            const r2 = (cloudflare as any).env.R2
+            const f = file as File
+            const key = `caregiver-certs/${cgId}/${certType}-${Date.now()}-${f.name}`
+            await r2.put(key, await f.arrayBuffer(), { httpMetadata: { contentType: f.type } })
+            fileUrl = key
+          }
+          const now = new Date().toISOString()
+          await db.prepare('INSERT INTO caregiver_verifications (caregiver_id, doc_type, front_url, status, submitted_at, notes) VALUES (?, ?, ?, ?, ?, ?)').bind(cgId, certType, fileUrl, 'pending', now, expiry ? `Expires: ${expiry}` : '').run()
+          return Response.json({ success: true, status: 'pending', message: 'Certification submitted for review.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== GET CAREGIVER REVIEWS (public) ======
+    {
+      path: '/caregiver-reviews',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const rows = await db.prepare('SELECT rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
+          const reviews = rows.results || []
+          const avg = reviews.length > 0 ? (reviews as any[]).reduce((s, r) => s + (r as any).rating, 0) / reviews.length : 0
+          return Response.json({ success: true, reviews, avgRating: Math.round(avg*10)/10, reviewCount: reviews.length }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== SUBMIT REVIEW (from client portal) ======
+    {
+      path: '/submit-review',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { clientToken, caregiverId, bookingId, rating, reviewText, isPunctual, isCaring, isCommunicative, isProfessional, wouldHireAgain } = body
+          if (!caregiverId || !rating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
+          if (rating < 1 || rating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          let clientEmail = body.clientEmail || 'anonymous'
+          if (clientToken) {
+            const sess = await db.prepare('SELECT email FROM client_sessions WHERE token = ?').bind(clientToken).first()
+            if (sess) clientEmail = (sess as any).email
+          }
+          const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
+          const isRepeat = ((prior as any)?.cnt || 0) > 1 ? 1 : 0
+          await db.prepare('INSERT INTO caregiver_reviews (caregiver_id, client_email, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(parseInt(caregiverId), clientEmail, bookingId||null, rating, reviewText||'', isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
+          if (isRepeat) {
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(parseInt(caregiverId)).run()
+          }
+          return Response.json({ success: true, message: 'Review submitted. Thank you!' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== UPDATE RESPONSE METRICS ======
+    {
+      path: '/update-response-metrics',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { caregiverId, responseMinutes, accepted, completed } = body
+          if (!caregiverId) return Response.json({ success: false, error: 'caregiverId required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const cgId = parseInt(caregiverId)
+          const existing = await db.prepare('SELECT * FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          if (existing) {
+            const ex = existing as any
+            const newTotal = (ex.total_requests||0) + 1
+            const newAccepted = (ex.accepted||0) + (accepted?1:0)
+            const newCompleted = (ex.completed_shifts||0) + (completed?1:0)
+            const avgResp = responseMinutes != null ? ((ex.avg_response_minutes||0)*(ex.total_requests||1) + responseMinutes) / newTotal : ex.avg_response_minutes||0
+            await db.prepare("UPDATE caregiver_response_metrics SET total_requests=?,accepted=?,completed_shifts=?,avg_response_minutes=?,updated_at=datetime('now') WHERE caregiver_id=?").bind(newTotal,newAccepted,newCompleted,avgResp,cgId).run()
+          } else {
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,completed_shifts,avg_response_minutes,repeat_bookings) VALUES (?,?,?,?,?,0)").bind(cgId,1,accepted?1:0,completed?1:0,responseMinutes||0).run()
+          }
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+
   ],
 })
