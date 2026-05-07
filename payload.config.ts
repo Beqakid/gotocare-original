@@ -44,6 +44,86 @@ const cloudflare =
     ? await getCloudflareContextFromWrangler()
     : await getCloudflareContext({ async: true })
 
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// DISPATCH ENGINE — ZIP CENTROIDS + SCORING HELPERS
+// ═══════════════════════════════════════════════════════════════════════
+const _DISPATCH_ZIP_CENTROIDS: Record<string, { lat: number; lon: number }> = {
+  '95823': { lat: 38.4895, lon: -121.4531 }, '95828': { lat: 38.4710, lon: -121.4007 },
+  '95864': { lat: 38.5765, lon: -121.3817 }, '95814': { lat: 38.5816, lon: -121.4944 },
+  '95816': { lat: 38.5682, lon: -121.4684 }, '95817': { lat: 38.5477, lon: -121.4540 },
+  '95818': { lat: 38.5658, lon: -121.5070 }, '95819': { lat: 38.5681, lon: -121.4414 },
+  '95820': { lat: 38.5348, lon: -121.4531 }, '95821': { lat: 38.6116, lon: -121.3797 },
+  '95822': { lat: 38.5197, lon: -121.4876 }, '95824': { lat: 38.5143, lon: -121.4366 },
+  '95825': { lat: 38.5790, lon: -121.4028 }, '95826': { lat: 38.5478, lon: -121.3853 },
+  '95827': { lat: 38.5506, lon: -121.3605 }, '95829': { lat: 38.4841, lon: -121.3579 },
+  '95831': { lat: 38.5013, lon: -121.5250 }, '95832': { lat: 38.4737, lon: -121.4882 },
+  '95833': { lat: 38.6128, lon: -121.4954 }, '95834': { lat: 38.6384, lon: -121.4872 },
+  '95835': { lat: 38.6715, lon: -121.4871 }, '95838': { lat: 38.6415, lon: -121.4418 },
+  '95841': { lat: 38.6410, lon: -121.3494 }, '95842': { lat: 38.6713, lon: -121.3590 },
+  '95843': { lat: 38.7003, lon: -121.3617 },
+};
+function _haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3959; const dLat = (lat2-lat1)*Math.PI/180; const dLon = (lon2-lon1)*Math.PI/180;
+  const a = Math.sin(dLat/2)**2+Math.cos(lat1*Math.PI/180)*Math.cos(lat2*Math.PI/180)*Math.sin(dLon/2)**2;
+  return R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a));
+}
+function _getZipDist(z1: string, z2: string): number {
+  if (z1===z2) return 0;
+  const c1=_DISPATCH_ZIP_CENTROIDS[z1]; const c2=_DISPATCH_ZIP_CENTROIDS[z2];
+  return c1&&c2 ? _haversine(c1.lat,c1.lon,c2.lat,c2.lon) : 10;
+}
+function _dispatchScore(cg: any, careType: string, dist: number): number {
+  const skills: string[] = JSON.parse(cg.skills||'[]'); const ct=careType.toLowerCase();
+  const ctMatch = skills.some((s:string)=>s.toLowerCase()===ct)?35:skills.some((s:string)=>s.toLowerCase().includes(ct.split(' ')[0]))?20:0;
+  const distScore = dist<=2?20:dist<=5?18:dist<=10?14:dist<=15?10:dist<=25?5:0;
+  const onlineScore = cg.is_online?10:3; const trustScore=Math.min(100,cg.trust_score||50)/100*10;
+  const respScore=cg.avg_response_minutes?Math.max(0,5-Math.min(5,cg.avg_response_minutes/20)):3;
+  const ratingScore=(cg.avg_rating||4.0)/5*5; const availScore=skills.length>0?12:6;
+  return Math.round(ctMatch+distScore+onlineScore+trustScore+respScore+ratingScore+availScore);
+}
+const _ROUND_DURATION_MINS=[2,3,5,10];
+async function _findDispatchCgs(db: any, zip: string, careType: string, radius: number, limit: number): Promise<any[]> {
+  const { results } = await db.prepare(`
+    SELECT ca.id,ca.name,ca.zip_code,ca.skills,ca.hourly_rate,ca.photo_url,ca.city,ca.state,
+           COALESCE(cos.is_online,0) as is_online, COALESCE(cts.score,50) as trust_score,
+           COALESCE(crm.avg_response_minutes,60) as avg_response_minutes, COALESCE(crm.avg_rating,4.0) as avg_rating
+    FROM caregiver_accounts ca
+    LEFT JOIN caregiver_online_status cos ON cos.caregiver_id=ca.id
+    LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id=ca.id
+    LEFT JOIN caregiver_response_metrics crm ON crm.caregiver_id=ca.id
+    WHERE ca.zip_code IS NOT NULL LIMIT 300
+  `).all();
+  return results.map((cg: any)=>{const d=_getZipDist(zip,cg.zip_code||'');return{...cg,distance_miles:Math.round(d*10)/10,dispatch_score:_dispatchScore(cg,careType,d)};}).filter((cg:any)=>cg.distance_miles<=radius).sort((a:any,b:any)=>b.dispatch_score-a.dispatch_score).slice(0,limit);
+}
+async function _signVAPIDJWT(endpoint: string, pubKey: string, privKeyB64: string): Promise<string> {
+  const origin=new URL(endpoint).origin;
+  const hdr=btoa(JSON.stringify({typ:'JWT',alg:'ES256'})).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  const pay=btoa(JSON.stringify({aud:origin,exp:Math.floor(Date.now()/1000)+43200,sub:'mailto:hello@carehia.com'})).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  const si=`${hdr}.${pay}`;
+  const der=Uint8Array.from(atob(privKeyB64.replace(/-/g,'+').replace(/_/g,'/')),(c:string)=>c.charCodeAt(0));
+  const ck=await crypto.subtle.importKey('pkcs8',der.buffer,{name:'ECDSA',namedCurve:'P-256'},false,['sign']);
+  const sig=await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},ck,new TextEncoder().encode(si));
+  const sb=btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/=/g,'').replace(/\+/g,'-').replace(/\//g,'_');
+  return `${si}.${sb}`;
+}
+async function _sendPushBatch(db: any, cgIds: number[], vapidPub: string, vapidPriv: string): Promise<number> {
+  if(!cgIds.length||!vapidPriv||!vapidPub) return 0;
+  const ph=cgIds.map(()=>'?').join(',');
+  const {results:subs}=await db.prepare(`SELECT * FROM push_subscriptions WHERE caregiver_id IN (${ph})`).bind(...cgIds).all();
+  let sent=0;
+  for(const sub of subs){
+    try{
+      const jwt=await _signVAPIDJWT(sub.endpoint,vapidPub,vapidPriv);
+      const r=await fetch(sub.endpoint,{method:'POST',headers:{'Authorization':`vapid t=${jwt},k=${vapidPub}`,'TTL':'86400','Content-Length':'0'}});
+      if(r.ok){sent++;await db.prepare(`UPDATE push_subscriptions SET last_used_at=datetime('now') WHERE id=?`).bind(sub.id).run();}
+      else if(r.status===410){await db.prepare(`DELETE FROM push_subscriptions WHERE id=?`).bind(sub.id).run();}
+    }catch(_){}
+  }
+  return sent;
+}
+
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -2374,7 +2454,75 @@ Return a JSON object with these fields:
     },
 
 
-    // ====== CAREGIVER SELF-REGISTRATION ======
+    // ====== RESCHEDULE BOOKING ======
+    {
+      path: '/reschedule-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { bookingId, clientEmail, preferredDate, preferredTime, interviewType, notes } = body
+          if (!bookingId || !clientEmail) return Response.json({ error: 'bookingId and clientEmail required' }, { status: 400 })
+
+          // Verify this booking belongs to the client
+          const booking = await cloudflare.env.D1.prepare(
+            'SELECT id, status FROM caregiver_bookings WHERE id = ? AND client_email = ?'
+          ).bind(bookingId, clientEmail.toLowerCase()).first()
+          if (!booking) return Response.json({ error: 'Booking not found' }, { status: 404 })
+          if (booking.status === 'cancelled' || booking.status === 'hired') {
+            return Response.json({ error: 'Cannot reschedule a ' + booking.status + ' booking' }, { status: 400 })
+          }
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_bookings SET preferred_date = ?, preferred_time = ?, interview_type = ?, notes = ?, status = ? WHERE id = ? AND client_email = ?'
+          ).bind(
+            preferredDate || null,
+            preferredTime || null,
+            interviewType || 'video',
+            notes || null,
+            'pending',
+            bookingId,
+            clientEmail.toLowerCase()
+          ).run()
+
+          return Response.json({ success: true, message: 'Booking rescheduled successfully' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CANCEL BOOKING ======
+    {
+      path: '/cancel-booking',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { bookingId, clientEmail } = body
+          if (!bookingId || !clientEmail) return Response.json({ error: 'bookingId and clientEmail required' }, { status: 400 })
+
+          // Verify this booking belongs to the client
+          const booking = await cloudflare.env.D1.prepare(
+            'SELECT id, status FROM caregiver_bookings WHERE id = ? AND client_email = ?'
+          ).bind(bookingId, clientEmail.toLowerCase()).first()
+          if (!booking) return Response.json({ error: 'Booking not found' }, { status: 404 })
+          if (booking.status === 'hired') {
+            return Response.json({ error: 'Cannot cancel a hired booking' }, { status: 400 })
+          }
+
+          await cloudflare.env.D1.prepare(
+            "UPDATE caregiver_bookings SET status = 'cancelled' WHERE id = ? AND client_email = ?"
+          ).bind(bookingId, clientEmail.toLowerCase()).run()
+
+          return Response.json({ success: true, message: 'Booking cancelled' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+        // ====== CAREGIVER SELF-REGISTRATION ======
     {
       path: '/caregiver-register',
       method: 'post',
@@ -3277,13 +3425,13 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_time_entries WHERE caregiver_id = ? ORDER BY date DESC, created_at DESC LIMIT 200'
-          ).bind(session.account_id).all()
+            'SELECT * FROM caregiver_time_entries WHERE caregiver_email = ? ORDER BY date DESC, created_at DESC LIMIT 200'
+          ).bind(sessionRow.email).all()
           const entries = (result.results || []).map((e: any) => ({
             id: 'cloud_' + e.id,
             cloudId: String(e.id),
@@ -3291,7 +3439,7 @@ Return a JSON object with these fields:
             date: e.date,
             startTime: e.start_time,
             endTime: e.end_time,
-            duration: e.duration_minutes,
+            duration: e.duration_mins,
             status: e.status || 'completed',
             hourlyRate: e.hourly_rate,
             totalPay: e.total_pay,
@@ -3303,6 +3451,7 @@ Return a JSON object with these fields:
             otAfterHrs: e.ot_after_hrs,
             otMultiplier: e.ot_multiplier,
             notes: e.notes || '',
+            isInvoiced: e.is_invoiced === 1,
           }))
           return Response.json({ success: true, entries }, { headers })
         } catch (error) {
@@ -3319,16 +3468,16 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, entry } = body
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow2 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow2) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const r = await cloudflare.env.D1.prepare(
             `INSERT INTO caregiver_time_entries 
-             (caregiver_id, client_name, date, start_time, end_time, duration_minutes, status, hourly_rate, total_pay, regular_hours, overtime_hours, regular_pay, overtime_pay, billing_type, ot_after_hrs, ot_multiplier, notes)
+             (caregiver_email, client_name, date, start_time, end_time, duration_mins, status, hourly_rate, total_pay, regular_hours, overtime_hours, regular_pay, overtime_pay, billing_type, ot_after_hrs, ot_multiplier, notes)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
-            session.account_id,
+            sessionRow2.email,
             entry.clientName || '', entry.date || '', entry.startTime || '', entry.endTime || '',
             entry.duration || 0, entry.status || 'completed',
             entry.hourlyRate || 0, entry.totalPay || 0,
@@ -3353,14 +3502,43 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           const cloudId = url.searchParams.get('cloudId') || ''
           if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const sessionRow3 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!sessionRow3) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           await cloudflare.env.D1.prepare(
-            'DELETE FROM caregiver_time_entries WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(cloudId), session.account_id).run()
+            'DELETE FROM caregiver_time_entries WHERE id = ? AND caregiver_email = ?'
+          ).bind(Number(cloudId), sessionRow3.email).run()
           return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+
+    {
+      path: '/caregiver-time-entries',
+      method: 'put',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, cloudIds } = body
+          if (!token || !Array.isArray(cloudIds) || cloudIds.length === 0) {
+            return Response.json({ success: false, error: 'token and cloudIds required' }, { status: 400, headers })
+          }
+          const sessionRow4 = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sessionRow4) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          // Mark each entry as invoiced (only if owned by this caregiver)
+          for (const cloudId of cloudIds) {
+            await cloudflare.env.D1.prepare(
+              'UPDATE caregiver_time_entries SET is_invoiced = 1 WHERE id = ? AND caregiver_email = ?'
+            ).bind(Number(cloudId), sessionRow4.email).run()
+          }
+          return Response.json({ success: true, marked: cloudIds.length }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -3377,13 +3555,13 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ timer: null }, { headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const timerSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ timer: null }, { headers })
+          if (!timerSession) return Response.json({ timer: null }, { headers })
           const row = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_active_timer WHERE caregiver_id = ?'
-          ).bind(session.account_id).first() as any
+            'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
+          ).bind(timerSession.email).first() as any
           if (!row) return Response.json({ timer: null }, { headers })
           return Response.json({ timer: JSON.parse(row.timer_json || 'null') }, { headers })
         } catch (error) {
@@ -3405,11 +3583,11 @@ Return a JSON object with these fields:
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           if (timer === null) {
-            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_id = ?').bind(session.account_id).run()
+            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerSession.email).run()
           } else {
             await cloudflare.env.D1.prepare(
-              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_id, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
-            ).bind(session.account_id, JSON.stringify(timer)).run()
+              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
+            ).bind(timerSession.email, JSON.stringify(timer)).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
@@ -3534,16 +3712,17 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_private_clients WHERE caregiver_id = ? ORDER BY name ASC'
-          ).bind(session.account_id).all()
+            'SELECT * FROM caregiver_private_clients WHERE caregiver_email = ? ORDER BY name ASC'
+          ).bind(session.caregiver_email).all()
           const clients = (result.results || []).map((c: any) => ({
             id: 'cloud_' + c.id,
             cloudId: String(c.id),
             name: c.name,
+            email: c.email || '',
             phone: c.phone || '',
             hourlyRate: c.hourly_rate || 0,
             careType: c.care_type || '',
@@ -3567,14 +3746,14 @@ Return a JSON object with these fields:
           const { token, client } = body
           if (!token || !client) return Response.json({ success: false, error: 'token and client required' }, { status: 400, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const r = await cloudflare.env.D1.prepare(
-            'INSERT INTO caregiver_private_clients (caregiver_id, name, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
-            session.account_id, client.name || '', client.phone || '',
-            client.hourlyRate || 0, client.careType || '',
+            session.caregiver_email, client.name || '', client.email || '',
+            client.phone || '', client.hourlyRate || 0, client.careType || '',
             client.billingType || 'hourly', client.otAfterHrs || 8, client.otMultiplier || 1.5
           ).run() as any
           return Response.json({ success: true, cloudId: String(r.meta?.last_row_id || r.lastRowId || '') }, { headers })
@@ -3594,12 +3773,12 @@ Return a JSON object with these fields:
           const cloudId = url.searchParams.get('cloudId') || ''
           if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
           const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           await cloudflare.env.D1.prepare(
-            'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(cloudId), session.account_id).run()
+            'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_email = ?'
+          ).bind(Number(cloudId), session.caregiver_email).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -4011,6 +4190,823 @@ Return a JSON object with these fields:
           return Response.json({ success: true, posts: result.results }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Public caregiver profile (no auth required)
+    {
+      path: '/public-profile',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const result = await db.prepare(
+            'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
+          ).bind(parseInt(id)).first()
+          if (!result) return Response.json({ success: false, error: 'Profile not found' }, { status: 404, headers })
+          let skills = []
+          let certifications = []
+          try { skills = JSON.parse((result as any).skills || '[]') } catch {}
+          try { certifications = JSON.parse((result as any).certifications || '[]') } catch {}
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications } }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Save/get caregiver availability
+    {
+      path: '/caregiver-availability',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
+          const avail = await db.prepare('SELECT availability_json FROM caregiver_availability WHERE caregiver_id = ?').bind((session as any).caregiver_id).first()
+          return Response.json({ success: true, availability: avail ? JSON.parse((avail as any).availability_json || '{}') : {} }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+    {
+      path: '/caregiver-availability',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          const body = await req.json()
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
+          await db.prepare('INSERT OR REPLACE INTO caregiver_availability (caregiver_id, availability_json, updated_at) VALUES (?, ?, datetime(\'now\'))').bind((session as any).caregiver_id, JSON.stringify(body.availability || {})).run()
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+
+    // ====== TRUST STATUS (get full trust data for logged-in caregiver) ======
+    {
+      path: '/trust-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
+          const idVerif = await db.prepare('SELECT status, doc_type, submitted_at FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY id DESC LIMIT 1').bind(cgId).first()
+          const bgCheck = await db.prepare('SELECT status, initiated_at, completed_at, expires_at FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
+          const certRows = await db.prepare("SELECT doc_type as name, status, notes FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha','lvn','rn','dementia','hospice','tb')").bind(cgId).all()
+          const certifications = (certRows.results || []).map((c) => ({ name: (c as any).name?.toUpperCase() || '', status: (c as any).status || 'pending', expiry: (c as any).notes?.replace('Expires: ','') || '' }))
+          const reviewRows = await db.prepare('SELECT id, rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 10').bind(cgId).all()
+          const reviews = reviewRows.results || []
+          const reviewCount = reviews.length
+          const avgRating = reviewCount > 0 ? (reviews as any[]).reduce((s, r) => s + (r.rating || 0), 0) / reviewCount : 0
+          const metrics = await db.prepare('SELECT avg_response_minutes, total_requests, accepted, completed_shifts, repeat_bookings FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          const bookingCount = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status = 'accepted'").bind(String(cgId)).first()
+          const cgData = cg as any
+          let skills = []; try { skills = JSON.parse(cgData?.skills || '[]') } catch {}
+          const profileComplete = !!(cgData?.bio && cgData?.photo_url && cgData?.hourly_rate && skills.length > 0)
+          const idVerified = (idVerif as any)?.status === 'verified'
+          const bgChecked = (bgCheck as any)?.status === 'verified'
+          const hasCPR = certifications.some(c => c.name === 'CPR' && c.status === 'verified')
+          const hasCNA = certifications.some(c => ['CNA','HHA'].includes(c.name) && c.status === 'verified')
+          const shifts5plus = ((bookingCount as any)?.cnt || 0) >= 5
+          const fastResponder = (metrics as any)?.avg_response_minutes > 0 && (metrics as any)?.avg_response_minutes <= 5
+          const repeatClients = ((metrics as any)?.repeat_bookings || 0) >= 3
+          const fiveStarAvg = avgRating >= 4.9 && reviewCount >= 3
+          const score = (idVerified?20:0)+(bgChecked?20:0)+(hasCPR?15:0)+(hasCNA?10:0)+(profileComplete?10:0)+(shifts5plus?10:0)+(fastResponder?5:0)+(repeatClients?5:0)+(fiveStarAvg?5:0)
+          const level = score>=90?'Elite Caregiver':score>=70?'Verified Pro':score>=40?'Trusted':'Basic'
+          return Response.json({ success: true, score, level, breakdown: { id_verified: idVerified, background_checked: bgChecked, cpr_certified: hasCPR, cna_verified: hasCNA, profile_complete: profileComplete, shifts_5plus: shifts5plus, fast_responder: fastResponder, repeat_clients: repeatClients, five_star_avg: fiveStarAvg }, idVerification: idVerif || null, backgroundCheck: bgCheck || null, certifications, reviews, reviewCount, avgRating: Math.round(avgRating*10)/10, metrics: metrics || null }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== PUBLIC TRUST SCORE ======
+    {
+      path: '/trust-score',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const cgId = parseInt(id)
+          const idVerif = await db.prepare('SELECT status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN (?) ORDER BY id DESC LIMIT 1').bind(cgId, 'drivers_license,state_id,passport').first()
+          const bgCheck = await db.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
+          const certRows = await db.prepare("SELECT doc_type as name, status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha')").bind(cgId).all()
+          const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
+          const reviewAgg = await db.prepare('SELECT COUNT(*) as cnt, AVG(rating) as avg FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1').bind(cgId).first()
+          const bookingCount = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status = 'accepted'").bind(String(cgId)).first()
+          const metrics = await db.prepare('SELECT avg_response_minutes, repeat_bookings FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          const cgData = cg as any; let skills = []; try { skills = JSON.parse(cgData?.skills||'[]') } catch {}
+          const profileComplete = !!(cgData?.bio && cgData?.photo_url && cgData?.hourly_rate && skills.length>0)
+          const certs = certRows.results || []
+          const hasCPR = (certs as any[]).some(c => c.name==='cpr' && c.status==='verified')
+          const hasCNA = (certs as any[]).some(c => ['cna','hha'].includes(c.name) && c.status==='verified')
+          const ra = reviewAgg as any; const bk = bookingCount as any; const mt = metrics as any
+          const score = ((idVerif as any)?.status==='verified'?20:0)+((bgCheck as any)?.status==='verified'?20:0)+(hasCPR?15:0)+(hasCNA?10:0)+(profileComplete?10:0)+((bk?.cnt||0)>=5?10:0)+(mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0?5:0)+((mt?.repeat_bookings||0)>=3?5:0)+((ra?.avg||0)>=4.9&&(ra?.cnt||0)>=3?5:0)
+          const level = score>=90?'Elite Caregiver':score>=70?'Verified Pro':score>=40?'Trusted':'Basic'
+          return Response.json({ success: true, score, level, idVerified: (idVerif as any)?.status==='verified', backgroundChecked: (bgCheck as any)?.status==='verified', hasCPR, hasCNA, reviewCount: ra?.cnt||0, avgRating: Math.round((ra?.avg||0)*10)/10, fastResponder: mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0 }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== INITIATE BACKGROUND CHECK ======
+    {
+      path: '/trust-background',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const now = new Date().toISOString()
+          const exp = new Date(Date.now() + 365*24*3600*1000).toISOString()
+          await db.prepare('INSERT OR REPLACE INTO caregiver_background_checks (caregiver_id, status, provider, initiated_at, expires_at) VALUES (?, ?, ?, ?, ?)').bind(cgId, 'pending', 'manual_review', now, exp).run()
+          return Response.json({ success: true, status: 'pending', message: 'Background check initiated. Our team will contact you within 1-2 business days.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== UPLOAD ID VERIFICATION ======
+    {
+      path: '/trust-id-upload',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const formData = await req.formData()
+          const file = formData.get('file')
+          const docType = formData.get('doc_type') || 'id_document'
+          let frontUrl = ''
+          if (file && (file as File).size) {
+            const r2 = (cloudflare as any).env.R2
+            const f = file as File
+            const key = `caregiver-id/${cgId}/${docType}-${Date.now()}-${f.name}`
+            await r2.put(key, await f.arrayBuffer(), { httpMetadata: { contentType: f.type } })
+            frontUrl = key
+          }
+          const now = new Date().toISOString()
+          await db.prepare('INSERT OR REPLACE INTO caregiver_verifications (caregiver_id, doc_type, front_url, status, submitted_at) VALUES (?, ?, ?, ?, ?)').bind(cgId, docType, frontUrl, 'pending', now).run()
+          return Response.json({ success: true, status: 'pending', message: 'ID submitted for review.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== ADD CERTIFICATION ======
+    {
+      path: '/trust-certification',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
+          const cgId = (session as any).caregiver_id
+          const formData = await req.formData()
+          const certType = formData.get('cert_type') || 'other'
+          const expiry = formData.get('expiry') || ''
+          const file = formData.get('file')
+          let fileUrl = ''
+          if (file && (file as File).size) {
+            const r2 = (cloudflare as any).env.R2
+            const f = file as File
+            const key = `caregiver-certs/${cgId}/${certType}-${Date.now()}-${f.name}`
+            await r2.put(key, await f.arrayBuffer(), { httpMetadata: { contentType: f.type } })
+            fileUrl = key
+          }
+          const now = new Date().toISOString()
+          await db.prepare('INSERT INTO caregiver_verifications (caregiver_id, doc_type, front_url, status, submitted_at, notes) VALUES (?, ?, ?, ?, ?, ?)').bind(cgId, certType, fileUrl, 'pending', now, expiry ? `Expires: ${expiry}` : '').run()
+          return Response.json({ success: true, status: 'pending', message: 'Certification submitted for review.' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== GET CAREGIVER REVIEWS (public) ======
+    {
+      path: '/caregiver-reviews',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const id = url.searchParams.get('id')
+          if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const rows = await db.prepare('SELECT rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
+          const reviews = rows.results || []
+          const avg = reviews.length > 0 ? (reviews as any[]).reduce((s, r) => s + (r as any).rating, 0) / reviews.length : 0
+          return Response.json({ success: true, reviews, avgRating: Math.round(avg*10)/10, reviewCount: reviews.length }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== SUBMIT REVIEW (from client portal) ======
+    {
+      path: '/submit-review',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { clientToken, caregiverId, bookingId, rating, reviewText, isPunctual, isCaring, isCommunicative, isProfessional, wouldHireAgain } = body
+          if (!caregiverId || !rating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
+          if (rating < 1 || rating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          let clientEmail = body.clientEmail || 'anonymous'
+          if (clientToken) {
+            const sess = await db.prepare('SELECT email FROM client_sessions WHERE token = ?').bind(clientToken).first()
+            if (sess) clientEmail = (sess as any).email
+          }
+          const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
+          const isRepeat = ((prior as any)?.cnt || 0) > 1 ? 1 : 0
+          await db.prepare('INSERT INTO caregiver_reviews (caregiver_id, client_email, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(parseInt(caregiverId), clientEmail, bookingId||null, rating, reviewText||'', isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
+          if (isRepeat) {
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(parseInt(caregiverId)).run()
+          }
+          return Response.json({ success: true, message: 'Review submitted. Thank you!' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== UPDATE RESPONSE METRICS ======
+    {
+      path: '/update-response-metrics',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { caregiverId, responseMinutes, accepted, completed } = body
+          if (!caregiverId) return Response.json({ success: false, error: 'caregiverId required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const cgId = parseInt(caregiverId)
+          const existing = await db.prepare('SELECT * FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
+          if (existing) {
+            const ex = existing as any
+            const newTotal = (ex.total_requests||0) + 1
+            const newAccepted = (ex.accepted||0) + (accepted?1:0)
+            const newCompleted = (ex.completed_shifts||0) + (completed?1:0)
+            const avgResp = responseMinutes != null ? ((ex.avg_response_minutes||0)*(ex.total_requests||1) + responseMinutes) / newTotal : ex.avg_response_minutes||0
+            await db.prepare("UPDATE caregiver_response_metrics SET total_requests=?,accepted=?,completed_shifts=?,avg_response_minutes=?,updated_at=datetime('now') WHERE caregiver_id=?").bind(newTotal,newAccepted,newCompleted,avgResp,cgId).run()
+          } else {
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,completed_shifts,avg_response_minutes,repeat_bookings) VALUES (?,?,?,?,?,0)").bind(cgId,1,accepted?1:0,completed?1:0,responseMinutes||0).run()
+          }
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+
+
+    // ====== PHASE 1A: CARE REQUEST DISPATCH ======
+    {
+      path: '/care-request',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers })
+        try {
+          const body = await req.json()
+          const { care_type, care_types, description, zip_code, city, state, start_date, start_time, duration_hours, pay_rate, client_email, client_id } = body
+          if (!care_type || !zip_code) return Response.json({ error: 'care_type and zip_code required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const env = (cloudflare as any).env
+          const insert = await db.prepare(`INSERT INTO care_requests (client_id,client_email,care_type,care_types,description,zip_code,city,state,start_date,start_time,duration_hours,pay_rate,status,round_1_sent_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'dispatching',datetime('now'),datetime('now')) RETURNING id`).bind(client_id||null,client_email||null,care_type,JSON.stringify(care_types||[care_type]),description||'',zip_code,city||'',state||'',start_date||'',start_time||'',duration_hours||null,pay_rate||25).all()
+          const requestId = insert.results[0]?.id
+          if (!requestId) return Response.json({ error: 'Failed to create request' }, { status: 500, headers })
+          const caregivers = await _findDispatchCgs(db, zip_code, care_type, 5, 10)
+          for (const cg of caregivers) { await db.prepare(`INSERT OR IGNORE INTO dispatch_notifications (request_id,caregiver_id,round,status,dispatch_score,distance_miles) VALUES (?,?,1,'sent',?,?)`).bind(requestId,cg.id,cg.dispatch_score,cg.distance_miles).run() }
+          await db.prepare(`UPDATE care_requests SET caregivers_notified=? WHERE id=?`).bind(caregivers.length, requestId).run()
+          const pushSent = await _sendPushBatch(db, caregivers.map((c:any)=>c.id), env.VAPID_PUBLIC_KEY, env.VAPID_PRIVATE_KEY)
+          const { results: ms } = await db.prepare(`SELECT COUNT(*) as cnt FROM booking_milestones`).all()
+          const bn = ((ms[0] as any)?.cnt||0)+1
+          await db.prepare(`INSERT INTO booking_milestones (request_id,booking_number,zip_code,care_type,client_id,caregivers_notified,request_created_at,first_notification_at) VALUES (?,?,?,?,?,?,datetime('now'),datetime('now'))`).bind(requestId,bn,zip_code,care_type,client_id||null,caregivers.length).run()
+          return Response.json({ success:true, request_id:requestId, booking_number:bn, caregivers_notified:caregivers.length, push_sent:pushSent, round:1, message:`Found ${caregivers.length} caregivers near you. Notifying them now.` }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CARE REQUEST STATUS (CLIENT POLLS) ======
+    {
+      path: '/care-request-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url||'', 'http://x'); const requestId = url.searchParams.get('id')
+          if (!requestId) return Response.json({ error: 'id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1; const env = (cloudflare as any).env
+          const { results } = await db.prepare(`SELECT * FROM care_requests WHERE id=?`).bind(requestId).all()
+          const request = (results as any[])[0]; if (!request) return Response.json({ error: 'Not found' }, { status: 404, headers })
+          const { results: notifs } = await db.prepare(`SELECT status,COUNT(*) as cnt FROM dispatch_notifications WHERE request_id=? GROUP BY status`).bind(requestId).all()
+          const byStatus: any = {}; (notifs as any[]).forEach((n:any)=>{ byStatus[n.status]=n.cnt })
+          const viewing = byStatus['viewed']||0; const now = Date.now()
+          const elapsedMins = (now - new Date(request.created_at).getTime())/60000
+          let progressMessage = 'Finding caregivers near you'; let progressStep = 1
+          if (request.status==='accepted') { progressMessage='A caregiver accepted your request!'; progressStep=4 }
+          else if (viewing>0) { progressMessage=`${viewing} caregiver${viewing>1?'s are':' is'} reviewing your request`; progressStep=3 }
+          else if (request.caregivers_notified>0) {
+            progressMessage=`Notified ${request.caregivers_notified} caregivers`; progressStep=2
+            if (elapsedMins>5) { progressMessage='Still searching — expanding search radius'; progressStep=5 }
+          }
+          // Advance round if needed
+          const roundFields=['round_1_sent_at','round_2_sent_at','round_3_sent_at','round_4_sent_at']
+          const roundConfigs=[{afterMins:0,radius:5,limit:10},{afterMins:2,radius:10,limit:15},{afterMins:5,radius:15,limit:25},{afterMins:10,radius:25,limit:50}]
+          if (request.status==='dispatching') {
+            for (let r=1;r<4;r++) {
+              const prevSent=(request as any)[roundFields[r-1]]; const thisSent=(request as any)[roundFields[r]]
+              if (prevSent&&!thisSent&&(now-new Date(prevSent).getTime())/60000>=roundConfigs[r].afterMins) {
+                const newCgs=await _findDispatchCgs(db,request.zip_code,request.care_type,roundConfigs[r].radius,roundConfigs[r].limit)
+                const {results:ex}=await db.prepare(`SELECT caregiver_id FROM dispatch_notifications WHERE request_id=?`).bind(requestId).all()
+                const exIds=new Set((ex as any[]).map((n:any)=>n.caregiver_id))
+                const newOnly=newCgs.filter((cg:any)=>!exIds.has(cg.id))
+                for(const cg of newOnly){await db.prepare(`INSERT OR IGNORE INTO dispatch_notifications (request_id,caregiver_id,round,status,dispatch_score,distance_miles) VALUES (?,?,?,'sent',?,?)`).bind(requestId,cg.id,r+1,cg.dispatch_score,cg.distance_miles).run()}
+                await db.prepare(`UPDATE care_requests SET current_round=?,${roundFields[r]}=datetime('now'),caregivers_notified=caregivers_notified+? WHERE id=?`).bind(r+1,newOnly.length,requestId).run()
+                await _sendPushBatch(db,newOnly.map((c:any)=>c.id),env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY); break
+              }
+            }
+          }
+          let acceptedCaregiver = null
+          if (request.accepted_caregiver_id) {
+            const {results:cgs}=await db.prepare(`SELECT id,name,photo_url,hourly_rate,city FROM caregiver_accounts WHERE id=?`).bind(request.accepted_caregiver_id).all()
+            acceptedCaregiver=(cgs as any[])[0]||null
+          }
+          return Response.json({ request_id:request.id, status:request.status, current_round:request.current_round||1, caregivers_notified:request.caregivers_notified, caregivers_viewing:viewing, caregivers_declined:byStatus['declined']||0, progress_message:progressMessage, progress_step:progressStep, accepted_caregiver:acceptedCaregiver, created_at:request.created_at, accepted_at:request.accepted_at }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CAREGIVER LIVE REQUESTS (CAREGIVER POLLS) ======
+    {
+      path: '/caregiver-live-requests',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url||'','http://x'); const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:cgRows}=await db.prepare(`SELECT * FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
+          const cg=(cgRows as any[])[0]; if(!cg) return Response.json({ error:'Not found' }, { status:404, headers })
+          await db.prepare(`UPDATE dispatch_notifications SET status='viewed',viewed_at=datetime('now') WHERE caregiver_id=? AND status='sent'`).bind(caregiverId).run()
+          await db.prepare(`INSERT OR REPLACE INTO caregiver_online_status (caregiver_id,is_online,zip_code,last_seen,updated_at) VALUES (?,1,?,datetime('now'),datetime('now'))`).bind(caregiverId,cg.zip_code||'').run()
+          const {results:dispatches}=await db.prepare(`
+            SELECT dn.id as dispatch_id,dn.request_id,dn.round,dn.status as dispatch_status,dn.dispatch_score,dn.distance_miles,dn.sent_at,
+                   cr.care_type,cr.description,cr.zip_code,cr.city,cr.state,cr.start_date,cr.start_time,cr.duration_hours,
+                   cr.pay_rate,cr.status as request_status,cr.created_at,cr.current_round,cr.round_1_sent_at,cr.round_2_sent_at,cr.round_3_sent_at,cr.round_4_sent_at,cr.accepted_caregiver_id
+            FROM dispatch_notifications dn JOIN care_requests cr ON cr.id=dn.request_id
+            WHERE dn.caregiver_id=? AND cr.status IN ('pending','dispatching') AND dn.status NOT IN ('declined','expired')
+            ORDER BY cr.created_at DESC LIMIT 20
+          `).bind(caregiverId).all()
+          const enriched=(dispatches as any[]).map((d:any)=>{
+            const ri=(d.current_round||1)-1
+            const rsf=[d.round_1_sent_at,d.round_2_sent_at,d.round_3_sent_at,d.round_4_sent_at]
+            const expiresAt=rsf[ri]?new Date(rsf[ri]).getTime()+(_ROUND_DURATION_MINS[ri]||2)*60000:Date.now()+120000
+            const remaining=expiresAt-Date.now(); const taken=d.accepted_caregiver_id&&d.accepted_caregiver_id!==caregiverId
+            return {dispatch_id:d.dispatch_id,request_id:d.request_id,care_type:d.care_type,description:d.description||'',zip_code:d.zip_code,city:d.city,distance_miles:d.distance_miles,pay_rate:d.pay_rate,start_date:d.start_date,start_time:d.start_time,duration_hours:d.duration_hours,dispatch_score:d.dispatch_score,round:d.current_round,request_status:taken?'taken':remaining<=0?'expired':d.request_status,expires_at:new Date(expiresAt).toISOString(),expires_in_ms:Math.max(0,remaining),is_expired:remaining<=0||taken,sent_at:d.sent_at}
+          })
+          return Response.json({ requests:enriched, count:enriched.length }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== DISPATCH ACCEPT (ATOMIC FIRST-ACCEPT-WINS) ======
+    {
+      path: '/dispatch-accept',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, request_id } = body
+          if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:dn}=await db.prepare(`SELECT * FROM dispatch_notifications WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).all()
+          if (!(dn as any[])[0]) return Response.json({ error: 'Not dispatched to you' }, { status: 403, headers })
+          const result=await db.prepare(`UPDATE care_requests SET status='accepted',accepted_caregiver_id=?,accepted_at=datetime('now') WHERE id=? AND status IN ('pending','dispatching')`).bind(caregiverId,request_id).run()
+          if (result.meta.changes===0) {
+            const {results:ex}=await db.prepare(`SELECT accepted_caregiver_id FROM care_requests WHERE id=?`).bind(request_id).all()
+            if ((ex as any[])[0]?.accepted_caregiver_id===caregiverId) return Response.json({ success:true, message:'You already accepted this booking.' }, { headers })
+            return Response.json({ error:'This booking has already been accepted by another caregiver.',taken:true }, { status: 409, headers })
+          }
+          await db.prepare(`UPDATE dispatch_notifications SET status='accepted',responded_at=datetime('now') WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).run()
+          await db.prepare(`UPDATE dispatch_notifications SET status='expired' WHERE request_id=? AND caregiver_id!=?`).bind(request_id,caregiverId).run()
+          const {results:crRow}=await db.prepare(`SELECT * FROM care_requests WHERE id=?`).bind(request_id).all()
+          const cr=(crRow as any[])[0]
+          if (cr) {
+            const secs=Math.round((Date.now()-new Date(cr.created_at).getTime())/1000)
+            await db.prepare(`UPDATE booking_milestones SET caregiver_id=?,accepted_at=datetime('now'),time_to_accept_seconds=? WHERE request_id=?`).bind(caregiverId,secs,request_id).run()
+          }
+          await db.prepare(`INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,avg_response_minutes,updated_at) VALUES (?,1,1,5,datetime('now')) ON CONFLICT(caregiver_id) DO UPDATE SET total_requests=total_requests+1,accepted=accepted+1,updated_at=datetime('now')`).bind(caregiverId).run()
+          return Response.json({ success:true, message:'Booking accepted! View the details below.', request:{ id:cr?.id, care_type:cr?.care_type, zip_code:cr?.zip_code, city:cr?.city, start_date:cr?.start_date, start_time:cr?.start_time, pay_rate:cr?.pay_rate } }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== DISPATCH DECLINE ======
+    {
+      path: '/dispatch-decline',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, request_id } = body
+          if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          await db.prepare(`UPDATE dispatch_notifications SET status='declined',responded_at=datetime('now') WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).run()
+          await db.prepare(`UPDATE care_requests SET caregivers_declined=caregivers_declined+1 WHERE id=?`).bind(request_id).run()
+          await db.prepare(`INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,avg_response_minutes,updated_at) VALUES (?,1,0,5,datetime('now')) ON CONFLICT(caregiver_id) DO UPDATE SET total_requests=total_requests+1,updated_at=datetime('now')`).bind(caregiverId).run()
+          return Response.json({ success:true, message:'Request passed.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CAREGIVER ONLINE STATUS ======
+    {
+      path: '/caregiver-online-status',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, is_online } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const {results:cgRows}=await db.prepare(`SELECT zip_code FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
+          const zip=(cgRows as any[])[0]?.zip_code||''
+          await db.prepare(`INSERT OR REPLACE INTO caregiver_online_status (caregiver_id,is_online,zip_code,last_seen,updated_at) VALUES (?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,is_online?1:0,zip).run()
+          return Response.json({ success:true, is_online:!!is_online }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH SUBSCRIBE ======
+    {
+      path: '/push-subscribe',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, endpoint, p256dh, auth, user_agent } = body
+          if (!token||!endpoint) return Response.json({ error: 'token and endpoint required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          await db.prepare(`INSERT OR REPLACE INTO push_subscriptions (caregiver_id,endpoint,p256dh,auth,user_agent,created_at,last_used_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,endpoint,p256dh||null,auth||null,user_agent||null).run()
+          return Response.json({ success:true, message:'Push subscription saved.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH UNSUBSCRIBE ======
+    {
+      path: '/push-unsubscribe',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          await db.prepare(`DELETE FROM push_subscriptions WHERE caregiver_id=?`).bind((sess as any[])[0].caregiver_id).run()
+          return Response.json({ success:true }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== PUSH TEST ======
+    {
+      path: '/push-test',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
+          const db = (cloudflare as any).env.D1; const env = (cloudflare as any).env
+          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId=(sess as any[])[0].caregiver_id
+          const sent=await _sendPushBatch(db,[caregiverId],env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY)
+          return Response.json({ success:true, sent, message:sent>0?'Test notification sent!':'No push subscription found. Enable notifications first.' }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== ADMIN LAUNCH METRICS ======
+    {
+      path: '/admin-launch-metrics',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        const url = new URL(req.url||'','http://x'); const adminKey=url.searchParams.get('key')
+        if (adminKey!=='carehia_launch_2026') return Response.json({ error:'Unauthorized' }, { status:401, headers })
+        try {
+          const db = (cloudflare as any).env.D1
+          const TARGET_ZIPS = ['95823','95828','95864']
+          const zipMetrics: any[] = []
+          for (const zip of TARGET_ZIPS) {
+            const {results:t}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts WHERE zip_code=?`).bind(zip).all()
+            const {results:o}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_online_status WHERE zip_code=? AND is_online=1`).bind(zip).all()
+            const {results:p}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts WHERE zip_code=? AND skills IS NOT NULL AND bio IS NOT NULL AND photo_url IS NOT NULL`).bind(zip).all()
+            const {results:pu}=await db.prepare(`SELECT COUNT(DISTINCT ps.caregiver_id) as cnt FROM push_subscriptions ps JOIN caregiver_accounts ca ON ca.id=ps.caregiver_id WHERE ca.zip_code=?`).bind(zip).all()
+            const {results:tv}=await db.prepare(`SELECT COUNT(DISTINCT cts.caregiver_id) as cnt FROM caregiver_trust_scores cts JOIN caregiver_accounts ca ON ca.id=cts.caregiver_id WHERE ca.zip_code=? AND cts.score>=60`).bind(zip).all()
+            const tc=(t[0] as any)?.cnt||0,oc=(o[0] as any)?.cnt||0,pc=(p[0] as any)?.cnt||0,puc=(pu[0] as any)?.cnt||0,tvc=(tv[0] as any)?.cnt||0
+            const lr=tc>=30&&pc>=15&&oc>=10&&puc>=8; const bs=tc>=10&&pc>=5
+            zipMetrics.push({ zip, city:zip==='95823'?'Sacramento (South)':zip==='95828'?'Sacramento (SE)':'Sacramento (NE)', total_caregivers:tc, online_caregivers:oc, profile_complete:pc, push_enabled:puc, trust_verified:tvc, launch_status:lr?'Launch Ready ✅':bs?'Building Supply 🔄':'Weak Supply ⚠️', launch_ready:lr })
+          }
+          const {results:tc2}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_accounts`).all()
+          const {results:to}=await db.prepare(`SELECT COUNT(*) as cnt FROM caregiver_online_status WHERE is_online=1`).all()
+          const {results:tr}=await db.prepare(`SELECT COUNT(*) as cnt FROM care_requests`).all()
+          const {results:ta}=await db.prepare(`SELECT COUNT(*) as cnt FROM care_requests WHERE status='accepted'`).all()
+          const {results:ar}=await db.prepare(`SELECT AVG(time_to_accept_seconds) as avg FROM booking_milestones WHERE time_to_accept_seconds>0`).all()
+          return Response.json({ target_zips:zipMetrics, overall:{ total_caregivers:(tc2[0] as any)?.cnt||0, online_caregivers:(to[0] as any)?.cnt||0, total_requests:(tr[0] as any)?.cnt||0, accepted_requests:(ta[0] as any)?.cnt||0, avg_response_seconds:Math.round((ar[0] as any)?.avg||0) }, thresholds:{total:30,profile_complete:15,online:10,push_enabled:8}, generated_at:new Date().toISOString() }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== ADMIN FIRST 20 BOOKINGS ======
+    {
+      path: '/admin-first-20',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        const url = new URL(req.url||'','http://x'); const adminKey=url.searchParams.get('key')
+        if (adminKey!=='carehia_launch_2026') return Response.json({ error:'Unauthorized' }, { status:401, headers })
+        try {
+          const db = (cloudflare as any).env.D1
+          const {results:ms}=await db.prepare(`SELECT * FROM booking_milestones ORDER BY booking_number ASC LIMIT 20`).all()
+          const {results:s}=await db.prepare(`SELECT COUNT(*) as total, SUM(CASE WHEN accepted_at IS NOT NULL THEN 1 ELSE 0 END) as accepted, SUM(booking_completed) as completed, AVG(CASE WHEN time_to_accept_seconds>0 THEN time_to_accept_seconds END) as avg_time, SUM(review_left) as reviews, SUM(client_rebooked) as rebooked FROM booking_milestones`).all()
+          const sum=(s[0] as any)||{}; const total=sum.total||0; const accepted=sum.accepted||0
+          return Response.json({
+            bookings:ms, summary:{ total_created:total, total_accepted:accepted, total_completed:sum.completed||0, acceptance_rate:total>0?Math.round((accepted/total)*100):0, avg_time_to_accept_secs:Math.round(sum.avg_time||0), review_rate:accepted>0?Math.round(((sum.reviews||0)/accepted)*100):0, repeat_booking_rate:accepted>0?Math.round(((sum.rebooked||0)/accepted)*100):0 },
+            milestones:[{goal:1,reached:total>=1,label:'🎉 First Booking!'},{goal:5,reached:total>=5,label:'🚀 5 Bookings'},{goal:10,reached:total>=10,label:'🔥 10 Bookings'},{goal:20,reached:total>=20,label:'🏆 20 Bookings — Goal Reached!'}],
+            goal_message:'Goal: Complete first 20 bookings in the launch ZIPs.',generated_at:new Date().toISOString()
+          }, { headers })
+        } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
+      },
+    },
+
+    // ====== CLIENT ONSITE CAREGIVER TRACKER ======
+    {
+      path: '/client-onsite-caregiver',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url || '', 'http://x')
+          const clientToken = url.searchParams.get('clientToken')
+          if (!clientToken) return Response.json({ active: false, error: 'clientToken required' }, { status: 400, headers })
+
+          const db = (cloudflare as any).env.D1
+
+          // Validate token — check client_sessions
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(clientToken).first() as any
+
+          if (!session) return Response.json({ active: false, error: 'Invalid or expired token' }, { status: 401, headers })
+
+          const clientEmail = session.client_email
+
+          // Get caregivers on this client's team
+          const teamResult = await db.prepare(
+            "SELECT caregiver_id FROM client_team WHERE client_email = ? AND status = 'active'"
+          ).bind(clientEmail.toLowerCase()).all()
+
+          const caregiverIds: number[] = ((teamResult.results || []) as any[]).map((r: any) => r.caregiver_id)
+
+          if (!caregiverIds.length) {
+            return Response.json({ active: false, message: 'No caregivers on team' }, { headers })
+          }
+
+          // Find any caregiver on team who has an active timer running
+          // caregiver_active_timer uses caregiver_email — join via caregiver_accounts
+          const ph = caregiverIds.map(() => '?').join(',')
+          const timerRow = await db.prepare(
+            `SELECT cat.start_time, cat.client_name, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
+             FROM caregiver_active_timer cat
+             JOIN caregiver_accounts ca ON ca.email = cat.caregiver_email
+             WHERE ca.id IN (${ph})
+             ORDER BY cat.start_time DESC LIMIT 1`
+          ).bind(...caregiverIds).first() as any
+
+          if (!timerRow) {
+            return Response.json({ active: false, message: 'No caregiver currently onsite' }, { headers })
+          }
+
+          return Response.json({
+            active: true,
+            caregiver_name: timerRow.caregiver_name || 'Caregiver',
+            caregiver_id: timerRow.caregiver_id,
+            photo_url: timerRow.photo_url || null,
+            start_time: timerRow.start_time,
+            client_name: timerRow.client_name || '',
+          }, { headers })
+        } catch (error) {
+          return Response.json({ active: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== CLIENT PREFERENCES (save/load zip + care needs) ======
+    {
+      path: '/client-preferences',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          // Validate session
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
+          // Get zip + care_types from client_accounts
+          const client = await db.prepare(
+            'SELECT zip, care_types, name FROM client_accounts WHERE email = ?'
+          ).bind(session.client_email).first() as any
+          if (!client) return Response.json({ zip: null, careNeeds: [], headers })
+          return Response.json({
+            success: true,
+            zip: client.zip || null,
+            careNeeds: client.care_types ? JSON.parse(client.care_types) : [],
+            name: client.name || '',
+          }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-preferences',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          const body = await req.json()
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
+          const { zip, careNeeds } = body
+          await db.prepare(
+            'UPDATE client_accounts SET zip = ?, care_types = ? WHERE email = ?'
+          ).bind(zip || null, careNeeds ? JSON.stringify(careNeeds) : null, session.client_email).run()
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CLIENT SHORTLIST (persist across sessions) ======
+    {
+      path: '/client-shortlist',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ items: [] }, { headers })
+          const result = await db.prepare(
+            'SELECT caregiver_id, caregiver_data, saved_at FROM client_shortlist WHERE client_email = ? ORDER BY saved_at DESC'
+          ).bind(session.client_email).all()
+          const items = (result.results || []).map((r: any) => ({
+            caregiverId: r.caregiver_id,
+            savedAt: r.saved_at,
+            data: r.caregiver_data ? JSON.parse(r.caregiver_data) : null,
+          }))
+          return Response.json({ success: true, items }, { headers })
+        } catch (error) {
+          return Response.json({ items: [], error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
+      path: '/client-shortlist',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('clientToken')
+          const body = await req.json()
+          if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
+          const headers = { 'Access-Control-Allow-Origin': '*' }
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Not authenticated' }, { status: 401, headers })
+          const { action, caregiverId, caregiverData } = body
+          if (action === 'add') {
+            await db.prepare(
+              'INSERT OR REPLACE INTO client_shortlist (client_email, caregiver_id, caregiver_data) VALUES (?, ?, ?)'
+            ).bind(session.client_email, String(caregiverId), caregiverData ? JSON.stringify(caregiverData) : null).run()
+          } else if (action === 'remove') {
+            await db.prepare(
+              'DELETE FROM client_shortlist WHERE client_email = ? AND caregiver_id = ?'
+            ).bind(session.client_email, String(caregiverId)).run()
+          } else if (action === 'clear') {
+            await db.prepare(
+              'DELETE FROM client_shortlist WHERE client_email = ?'
+            ).bind(session.client_email).run()
+          }
+          return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
         }
       },
     },
