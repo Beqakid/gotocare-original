@@ -2349,8 +2349,7 @@ Return a JSON object with these fields:
           // Fetch bookings, JOIN client_accounts for real contact info when unlocked
           const result = await cloudflare.env.D1.prepare(
             `SELECT cb.*,
-              CASE WHEN cb.is_unlocked = 1 THEN ca.name ELSE NULL END as client_name,
-              CASE WHEN cb.is_unlocked = 1 THEN ca.phone ELSE NULL END as client_phone
+              CASE WHEN cb.is_unlocked = 1 THEN ca.name ELSE NULL END as client_name
              FROM caregiver_bookings cb
              LEFT JOIN client_accounts ca ON ca.email = cb.client_email
              WHERE cb.caregiver_id = ? ORDER BY cb.created_at DESC LIMIT 50`
