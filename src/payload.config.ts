@@ -2338,14 +2338,28 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const caregiverId = url.searchParams.get('caregiverId')
-          if (!caregiverId) return Response.json({ error: 'caregiverId required' }, { status: 400 })
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+          // Resolve token → account_id
+          const sess = await cloudflare.env.D1.prepare(
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
+          const caregiverId = sess.account_id
+          // Fetch bookings, JOIN client_accounts for real contact info when unlocked
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_bookings WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 50'
+            `SELECT cb.*,
+              CASE WHEN cb.is_unlocked = 1 THEN ca.name ELSE NULL END as client_name,
+              CASE WHEN cb.is_unlocked = 1 THEN ca.phone ELSE NULL END as client_phone
+             FROM caregiver_bookings cb
+             LEFT JOIN client_accounts ca ON ca.email = cb.client_email
+             WHERE cb.caregiver_id = ? ORDER BY cb.created_at DESC LIMIT 50`
           ).bind(String(caregiverId)).all()
           const bookings = (result.results || []).map((b: any) => ({
             id: b.id,
             clientEmail: b.is_unlocked ? b.client_email : (b.client_email ? b.client_email.substring(0, 2) + '***@***' : ''),
+            clientName: b.is_unlocked ? (b.client_name || null) : null,
+            clientPhone: b.is_unlocked ? (b.client_phone || null) : null,
             careNeeds: b.care_needs,
             preferredDate: b.is_unlocked ? b.preferred_date : null,
             preferredTime: b.is_unlocked ? b.preferred_time : null,
