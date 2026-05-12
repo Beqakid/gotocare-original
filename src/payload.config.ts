@@ -2165,39 +2165,62 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const location = url.searchParams.get('location') || ''
-          const specialty = url.searchParams.get('specialty') || ''
-          const page = parseInt(url.searchParams.get('page') || '1')
-          const limit = parseInt(url.searchParams.get('limit') || '20')
-          const where: any = { status: { equals: 'active' } }
-          if (specialty) {
-            where.specializations = { like: specialty }
-          }
-          const caregivers = await req.payload.find({
-            collection: 'caregivers',
-            where,
-            limit,
-            page,
-            depth: 0,
-            overrideAccess: true,
+          const specialty = (url.searchParams.get('specialty') || '').toLowerCase().trim()
+          const limit = parseInt(url.searchParams.get('limit') || '50')
+          // Query D1 caregiver_accounts — this is where marketplace caregivers self-register
+          const { results: rows } = await cloudflare.env.D1.prepare(
+            `SELECT id, name, email, phone, bio, photo_url, zip_code, city, state,
+                    languages, hourly_rate, skills, certifications, care_types, created_at
+             FROM caregiver_accounts
+             ORDER BY created_at DESC
+             LIMIT ?`
+          ).bind(limit).all()
+          const mapped = (rows || []).map((cg: any) => {
+            const nameParts = (cg.name || 'Caregiver').trim().split(' ')
+            const firstName = nameParts[0] || 'Caregiver'
+            const lastName = nameParts.slice(1).join(' ') || ''
+            let skills: string[] = []
+            try { skills = JSON.parse(cg.skills || '[]') } catch { skills = [] }
+            let certs: string[] = []
+            try { certs = JSON.parse(cg.certifications || '[]') } catch { certs = [] }
+            let langs = 'English'
+            try {
+              const l = JSON.parse(cg.languages || '["English"]')
+              langs = Array.isArray(l) ? l.join(', ') : String(l)
+            } catch { langs = cg.languages || 'English' }
+            const rate = parseFloat(cg.hourly_rate) || 28
+            // Match score based on specialty alignment
+            let matchScore = 82 + Math.floor(Math.random() * 10)
+            if (specialty && skills.length > 0) {
+              const exact = skills.some((s: string) => s.toLowerCase() === specialty)
+              const partial = skills.some((s: string) => s.toLowerCase().includes(specialty.split(' ')[0]))
+              if (exact) matchScore = 93 + Math.floor(Math.random() * 5)
+              else if (partial) matchScore = 86 + Math.floor(Math.random() * 6)
+              else matchScore = 76 + Math.floor(Math.random() * 8)
+            }
+            return {
+              id: cg.id,
+              firstName,
+              lastName,
+              specializations: skills.slice(0, 3).join(', ') || 'Home Care',
+              skills,
+              certifications: certs,
+              hourlyRate: rate,
+              rating: 4.8,
+              reviews: 0,
+              yearsExp: 3,
+              bio: cg.bio || '',
+              languages: langs,
+              availability: [1,1,1,1,1,0,0],
+              avatar: cg.photo_url || '👩‍⚕️',
+              city: cg.city || '',
+              state: cg.state || '',
+              zip_code: cg.zip_code || '',
+              matchScore,
+            }
           })
-          const mapped = caregivers.docs.map((cg: any) => ({
-            id: cg.id,
-            firstName: cg.firstName,
-            lastName: cg.lastName,
-            specializations: cg.specializations || cg.certifications || '',
-            skills: cg.skills || [],
-            hourlyRate: cg.hourlyRate || 28,
-            rating: cg.rating || 4.8,
-            reviews: cg.reviews || 0,
-            yearsExp: cg.experienceYears || 3,
-            bio: cg.bio || '',
-            languages: cg.languages || 'English',
-            availability: cg.availability || [1,1,1,1,1,0,0],
-            avatar: '\u{1F469}\u200D\u2695\uFE0F',
-            matchScore: 85 + Math.floor(Math.random() * 12),
-          }))
-          return Response.json({ success: true, caregivers: mapped, totalDocs: caregivers.totalDocs })
+          mapped.sort((a: any, b: any) => b.matchScore - a.matchScore)
+          return Response.json({ success: true, caregivers: mapped, totalDocs: mapped.length })
         } catch (error) {
           return Response.json({ success: false, caregivers: [], error: String(error) }, { status: 500 })
         }
