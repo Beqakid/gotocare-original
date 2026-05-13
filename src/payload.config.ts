@@ -3291,7 +3291,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
@@ -3330,7 +3330,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
@@ -3358,7 +3358,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const formData = await req.formData()
           const token = formData.get('token') || ''
           const name = formData.get('name') || ''
@@ -3400,7 +3400,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           const id = url.searchParams.get('id') || ''
@@ -3425,7 +3425,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const key = url.searchParams.get('key') || ''
           const token = url.searchParams.get('token') || ''
@@ -3447,7 +3447,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const caregiverEmail = url.searchParams.get('email') || ''
           const clientToken = url.searchParams.get('clientToken') || ''
@@ -3481,7 +3481,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const clientToken = url.searchParams.get('clientToken') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
@@ -3521,7 +3521,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const body = await req.json() as any
           const { clientToken, caregiverEmail, days, startTime, endTime, careType, notes, isRecurring } = body
           if (!clientToken || !caregiverEmail || !days || !startTime || !endTime) {
@@ -3547,7 +3547,7 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
-          const env = req.env as any
+          const env = cloudflare.env as any
           const url = new URL(req.url)
           const clientToken = url.searchParams.get('clientToken') || ''
           const caregiverEmail = url.searchParams.get('caregiverEmail') || ''
