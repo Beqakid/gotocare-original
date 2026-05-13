@@ -2025,7 +2025,7 @@ Return a JSON object with these fields:
               'customer_email': email,
               'line_items[0][price]': priceId,
               'line_items[0][quantity]': '1',
-              'success_url': 'https://gotocare-client-portal.pages.dev/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email),
+              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email),
               'cancel_url': 'https://gotocare-client-portal.pages.dev/?subscription=cancelled',
               'metadata[plan]': plan,
               'metadata[client_email]': email,
@@ -2072,6 +2072,37 @@ Return a JSON object with these fields:
           })
         } catch (error) {
           return Response.json({ subscribed: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CONFIRM CLIENT SUBSCRIPTION (called after Stripe redirect) ======
+    {
+      path: '/confirm-client-subscription',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email, plan, sessionId } = body
+          if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
+
+          // Check if already recorded (idempotent)
+          const existing = await cloudflare.env.D1.prepare(
+            'SELECT id FROM client_subscriptions WHERE email = ? AND plan = ? AND status = ?'
+          ).bind(email.toLowerCase(), plan, 'active').first()
+
+          if (!existing) {
+            const periodEnd = new Date()
+            periodEnd.setMonth(periodEnd.getMonth() + 1)
+            await cloudflare.env.D1.prepare(
+              `INSERT INTO client_subscriptions (email, plan, stripe_session_id, status, current_period_end)
+               VALUES (?, ?, ?, 'active', ?)`
+            ).bind(email.toLowerCase(), plan, sessionId || '', periodEnd.toISOString()).run()
+          }
+
+          return Response.json({ success: true, plan })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
         }
       },
     },
