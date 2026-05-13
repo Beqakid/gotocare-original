@@ -5123,5 +5123,43 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== GET CAREGIVER SUBSCRIPTION STATUS ======
+    {
+      path: '/caregiver-subscription',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token')
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+          const db = (cloudflare.env as any).D1
+          const session = await db.prepare(
+            "SELECT caregiver_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid token' }, { status: 401 })
+          const cgId = String(session.caregiver_id)
+          const sub = await db.prepare(
+            'SELECT * FROM caregiver_subscriptions WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(cgId).first() as any
+          if (!sub || sub.status !== 'active') {
+            return Response.json({ subscribed: false, plan: 'free' })
+          }
+          const now = new Date()
+          const expiresAt = sub.expires_at ? new Date(sub.expires_at) : null
+          const isValid = !expiresAt || expiresAt > now
+          return Response.json({
+            subscribed: isValid,
+            plan: sub.plan || 'unlimited',
+            status: sub.status,
+            expiresAt: sub.expires_at,
+            stripeSubscriptionId: sub.stripe_subscription_id,
+            createdAt: sub.created_at,
+          })
+        } catch (error) {
+          return Response.json({ subscribed: false, error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
   ],
 })
