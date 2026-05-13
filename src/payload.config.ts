@@ -2535,11 +2535,21 @@ Return a JSON object with these fields:
           const email = url.searchParams.get('email')
           if (!email) return Response.json({ error: 'email required' }, { status: 400 })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_bookings WHERE client_email = ? ORDER BY created_at DESC LIMIT 50'
+            `SELECT cb.id, cb.caregiver_id, cb.care_needs, cb.preferred_date, cb.preferred_time,
+             cb.interview_type, cb.notes, cb.status, cb.created_at,
+             ca.name as caregiver_name, ca.photo_url as caregiver_photo, ca.hourly_rate, ca.city, ca.state
+             FROM caregiver_bookings cb
+             LEFT JOIN caregiver_accounts ca ON ca.id = cb.caregiver_id
+             WHERE cb.client_email = ? ORDER BY cb.created_at DESC LIMIT 50`
           ).bind(email.toLowerCase()).all()
           const bookings = (result.results || []).map((b: any) => ({
             id: b.id,
             caregiverId: b.caregiver_id,
+            caregiverName: b.caregiver_name || 'Caregiver',
+            caregiverPhoto: b.caregiver_photo || null,
+            hourlyRate: b.hourly_rate || null,
+            city: b.city || null,
+            state: b.state || null,
             careNeeds: b.care_needs,
             preferredDate: b.preferred_date,
             preferredTime: b.preferred_time,
