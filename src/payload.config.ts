@@ -3342,7 +3342,7 @@ Return a JSON object with these fields:
           const count = docList.length
           // Check if client has paid subscription
           if (clientToken) {
-            const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
+            const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
             if (sess) {
               const sub = await env.D1.prepare('SELECT plan, status FROM client_subscriptions WHERE email = ? AND status = \'active\'').bind(sess.email).first()
               if (sub) {
@@ -3369,7 +3369,7 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const clientToken = url.searchParams.get('clientToken') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
-          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
+          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           const clientEmail = (sess as any).email
           // Get all accepted bookings for this client, join caregiver_accounts for email
@@ -3411,7 +3411,7 @@ Return a JSON object with these fields:
           if (!clientToken || !caregiverEmail || !days || !startTime || !endTime) {
             return Response.json({ success: false, error: 'Missing required fields' }, { headers })
           }
-          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
+          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           const daysStr = Array.isArray(days) ? days.join(',') : days
           // Upsert: delete existing then insert
@@ -3436,7 +3436,7 @@ Return a JSON object with these fields:
           const clientToken = url.searchParams.get('clientToken') || ''
           const caregiverEmail = url.searchParams.get('caregiverEmail') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
-          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
+          const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           if (caregiverEmail) {
             const schedule = await env.D1.prepare('SELECT * FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(sess.email, caregiverEmail).first()
@@ -4507,7 +4507,7 @@ Return a JSON object with these fields:
           const db = (cloudflare as any).env.D1
           let clientEmail = body.clientEmail || 'anonymous'
           if (clientToken) {
-            const sess = await db.prepare('SELECT email FROM client_sessions WHERE token = ?').bind(clientToken).first()
+            const sess = await db.prepare('SELECT email FROM client_sessions WHERE session_token = ?').bind(clientToken).first()
             if (sess) clientEmail = (sess as any).email
           }
           const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
@@ -4878,12 +4878,12 @@ Return a JSON object with these fields:
 
           // Validate token — check client_sessions
           const session = await db.prepare(
-            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
           ).bind(clientToken).first() as any
 
           if (!session) return Response.json({ active: false, error: 'Invalid or expired token' }, { status: 401, headers })
 
-          const clientEmail = session.client_email
+          const clientEmail = session.email
 
           // Get caregivers on this client's team
           const teamResult = await db.prepare(
@@ -4938,13 +4938,13 @@ Return a JSON object with these fields:
           const db = (cloudflare.env as any).D1
           // Validate session
           const session = await db.prepare(
-            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
           // Get zip + care_types from client_accounts
           const client = await db.prepare(
             'SELECT zip, care_types, name FROM client_accounts WHERE email = ?'
-          ).bind(session.client_email).first() as any
+          ).bind(session.email).first() as any
           if (!client) return Response.json({ zip: null, careNeeds: [], headers })
           return Response.json({
             success: true,
@@ -4969,13 +4969,13 @@ Return a JSON object with these fields:
           const headers = { 'Access-Control-Allow-Origin': '*' }
           const db = (cloudflare.env as any).D1
           const session = await db.prepare(
-            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ error: 'Invalid or expired token' }, { status: 401, headers })
           const { zip, careNeeds } = body
           await db.prepare(
             'UPDATE client_accounts SET zip = ?, care_types = ? WHERE email = ?'
-          ).bind(zip || null, careNeeds ? JSON.stringify(careNeeds) : null, session.client_email).run()
+          ).bind(zip || null, careNeeds ? JSON.stringify(careNeeds) : null, session.email).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
@@ -4994,12 +4994,12 @@ Return a JSON object with these fields:
           const headers = { 'Access-Control-Allow-Origin': '*' }
           const db = (cloudflare.env as any).D1
           const session = await db.prepare(
-            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ items: [] }, { headers })
           const result = await db.prepare(
             'SELECT caregiver_id, caregiver_data, saved_at FROM client_shortlist WHERE client_email = ? ORDER BY saved_at DESC'
-          ).bind(session.client_email).all()
+          ).bind(session.email).all()
           const items = (result.results || []).map((r: any) => ({
             caregiverId: r.caregiver_id,
             savedAt: r.saved_at,
@@ -5023,22 +5023,22 @@ Return a JSON object with these fields:
           const headers = { 'Access-Control-Allow-Origin': '*' }
           const db = (cloudflare.env as any).D1
           const session = await db.prepare(
-            "SELECT client_email FROM client_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ error: 'Not authenticated' }, { status: 401, headers })
           const { action, caregiverId, caregiverData } = body
           if (action === 'add') {
             await db.prepare(
               'INSERT OR REPLACE INTO client_shortlist (client_email, caregiver_id, caregiver_data) VALUES (?, ?, ?)'
-            ).bind(session.client_email, String(caregiverId), caregiverData ? JSON.stringify(caregiverData) : null).run()
+            ).bind(session.email, String(caregiverId), caregiverData ? JSON.stringify(caregiverData) : null).run()
           } else if (action === 'remove') {
             await db.prepare(
               'DELETE FROM client_shortlist WHERE client_email = ? AND caregiver_id = ?'
-            ).bind(session.client_email, String(caregiverId)).run()
+            ).bind(session.email, String(caregiverId)).run()
           } else if (action === 'clear') {
             await db.prepare(
               'DELETE FROM client_shortlist WHERE client_email = ?'
-            ).bind(session.client_email).run()
+            ).bind(session.email).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
