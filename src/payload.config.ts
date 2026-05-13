@@ -5201,5 +5201,100 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== SUPER ADMIN — CHECK IS_ADMIN ======
+    {
+      path: 'admin-check',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const token = req.query?.token as string;
+        if (!token) return Response.json({ error: 'No token' }, { status: 401 });
+        const { env } = req as any;
+        const db = env?.D1 as D1Database;
+        const sess = await db.prepare('SELECT ca.is_admin, ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any;
+        if (!sess || !sess.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403 });
+        return Response.json({ admin: true, email: sess.email, name: sess.name });
+      },
+    },
+
+    // ====== SUPER ADMIN — PLATFORM STATS ======
+    {
+      path: 'admin-stats',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const token = req.query?.token as string;
+        if (!token) return Response.json({ error: 'No token' }, { status: 401 });
+        const { env } = req as any;
+        const db = env?.D1 as D1Database;
+        const sess = await db.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any;
+        if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403 });
+        const [clients, caregivers, bookings, unlocked, team] = await Promise.all([
+          db.prepare('SELECT COUNT(*) as cnt FROM client_accounts').first() as any,
+          db.prepare('SELECT COUNT(*) as cnt FROM caregiver_accounts').first() as any,
+          db.prepare('SELECT COUNT(*) as cnt FROM caregiver_bookings').first() as any,
+          db.prepare('SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE is_unlocked = 1').first() as any,
+          db.prepare('SELECT COUNT(*) as cnt FROM client_team').first() as any,
+        ]);
+        const pendingB = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE status = 'pending'").first() as any;
+        const revenueUnlocks = (unlocked?.cnt || 0) * 4.99;
+        return Response.json({
+          totalClients: clients?.cnt || 0,
+          totalCaregivers: caregivers?.cnt || 0,
+          totalBookings: bookings?.cnt || 0,
+          unlockedBookings: unlocked?.cnt || 0,
+          pendingBookings: pendingB?.cnt || 0,
+          totalTeamHires: team?.cnt || 0,
+          estimatedRevenue: revenueUnlocks.toFixed(2),
+        });
+      },
+    },
+
+    // ====== SUPER ADMIN — LIST CLIENTS ======
+    {
+      path: 'admin-clients',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const token = req.query?.token as string;
+        if (!token) return Response.json({ error: 'No token' }, { status: 401 });
+        const { env } = req as any;
+        const db = env?.D1 as D1Database;
+        const sess = await db.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any;
+        if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403 });
+        const rows = await db.prepare('SELECT id, name, email, google_id, created_at, is_admin FROM client_accounts ORDER BY created_at DESC LIMIT 200').all();
+        return Response.json({ clients: rows.results });
+      },
+    },
+
+    // ====== SUPER ADMIN — LIST CAREGIVERS ======
+    {
+      path: 'admin-caregivers',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const token = req.query?.token as string;
+        if (!token) return Response.json({ error: 'No token' }, { status: 401 });
+        const { env } = req as any;
+        const db = env?.D1 as D1Database;
+        const sess = await db.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any;
+        if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403 });
+        const rows = await db.prepare('SELECT id, name, email, city, state, hourly_rate, care_types, created_at FROM caregiver_accounts ORDER BY created_at DESC LIMIT 200').all();
+        return Response.json({ caregivers: rows.results });
+      },
+    },
+
+    // ====== SUPER ADMIN — LIST BOOKINGS ======
+    {
+      path: 'admin-bookings',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const token = req.query?.token as string;
+        if (!token) return Response.json({ error: 'No token' }, { status: 401 });
+        const { env } = req as any;
+        const db = env?.D1 as D1Database;
+        const sess = await db.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any;
+        if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403 });
+        const rows = await db.prepare('SELECT cb.id, cb.client_email, cb.caregiver_id, ca.name as caregiver_name, cb.care_needs, cb.preferred_date, cb.preferred_time, cb.status, cb.is_unlocked, cb.created_at FROM caregiver_bookings cb LEFT JOIN caregiver_accounts ca ON ca.id = cb.caregiver_id ORDER BY cb.created_at DESC LIMIT 300').all();
+        return Response.json({ bookings: rows.results });
+      },
+    },
+
   ],
 })
