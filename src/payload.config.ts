@@ -2489,7 +2489,7 @@ Return a JSON object with these fields:
 
           // Insert subscription record
           await cloudflare.env.D1.prepare(
-            `INSERT INTO caregiver_subscriptions (caregiver_id, plan, status, created_at)
+            `INSERT OR REPLACE INTO caregiver_subscriptions (caregiver_id, plan, status, created_at)
              VALUES (?, 'unlimited', 'active', datetime('now'))`
           ).bind(caregiverId).run()
 
@@ -2511,15 +2511,24 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { caregiverId } = body
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+
+          // Look up caregiver ID from session token
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT account_id FROM caregiver_sessions WHERE token = ?'
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid token' }, { status: 401 })
+          const caregiverId = String(session.account_id)
+
           const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
           const params = new URLSearchParams({
             'mode': 'subscription',
             'line_items[0][price]': 'price_1TQmcY6E8zcVOY4tSOJ9E3X2',
             'line_items[0][quantity]': '1',
-            'success_url': 'https://work.carehia.com/?subscription=success&caregiver=' + (caregiverId || '') + '#requests',
-            'cancel_url': 'https://work.carehia.com/?subscription=cancelled',
-            'metadata[caregiver_id]': String(caregiverId || ''),
+            'success_url': 'https://work.carehia.com/?subscription=success#profile',
+            'cancel_url': 'https://work.carehia.com/?subscription=cancelled#profile',
+            'metadata[caregiver_id]': caregiverId,
             'metadata[type]': 'caregiver_subscription',
           })
           const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -2527,9 +2536,9 @@ Return a JSON object with these fields:
             headers: { 'Authorization': `Bearer ${stripeKey}`, 'Content-Type': 'application/x-www-form-urlencoded' },
             body: params.toString(),
           })
-          const session = await stripeRes.json() as any
-          if (!session.url) return Response.json({ error: 'Stripe session failed', details: session }, { status: 500 })
-          return Response.json({ success: true, url: session.url })
+          const stripeSession = await stripeRes.json() as any
+          if (!stripeSession.url) return Response.json({ error: 'Stripe session failed', details: stripeSession }, { status: 500 })
+          return Response.json({ success: true, url: stripeSession.url })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
