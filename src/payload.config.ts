@@ -2439,6 +2439,40 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ====== CONFIRM CAREGIVER SUBSCRIPTION (called from success URL) ======
+    {
+      path: '/confirm-caregiver-subscription',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 400 })
+
+          // Look up caregiver from session token
+          const session = await cloudflare.env.D1.prepare(
+            'SELECT account_id FROM caregiver_sessions WHERE token = ?'
+          ).bind(token).first() as any
+          if (!session) return Response.json({ error: 'Invalid token' }, { status: 401 })
+          const caregiverId = String(session.account_id)
+
+          // Insert subscription record
+          await cloudflare.env.D1.prepare(
+            `INSERT INTO caregiver_subscriptions (caregiver_id, plan, status, created_at)
+             VALUES (?, 'unlimited', 'active', datetime('now'))`
+          ).bind(caregiverId).run()
+
+          // Unlock ALL pending bookings for this caregiver
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_bookings SET is_unlocked = 1 WHERE caregiver_id = ?'
+          ).bind(caregiverId).run()
+
+          return Response.json({ success: true, caregiverId })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
     // ====== CREATE CAREGIVER SUBSCRIPTION ($19.99/mo) ======
     {
       path: '/create-caregiver-subscription-checkout',
