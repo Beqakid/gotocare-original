@@ -2407,6 +2407,38 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ====== CONFIRM BOOKING UNLOCK (webhook fallback — trust Stripe success_url redirect) ======
+    {
+      path: '/confirm-booking-unlock',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, bookingId } = body
+          if (!token || !bookingId) return Response.json({ error: 'token and bookingId required' }, { status: 400 })
+          // Validate caregiver token
+          const sessionRow = await cloudflare.env.D1.prepare(
+            'SELECT account_id FROM caregiver_sessions WHERE session_token = ?'
+          ).bind(token).first() as any
+          if (!sessionRow) return Response.json({ error: 'Invalid token' }, { status: 401 })
+          const caregiverId = sessionRow.account_id
+          // Mark this booking as unlocked (trust Stripe's success_url redirect)
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_bookings SET is_unlocked = 1 WHERE id = ? AND caregiver_id = ?'
+          ).bind(Number(bookingId), caregiverId).run()
+          // Return the now-unlocked booking with client details
+          const booking = await cloudflare.env.D1.prepare(`
+            SELECT cb.*, ca.name as client_name, ca.email as client_email
+            FROM caregiver_bookings cb
+            LEFT JOIN client_accounts ca ON cb.client_email = ca.email
+            WHERE cb.id = ? AND cb.caregiver_id = ?
+          `).bind(Number(bookingId), caregiverId).first() as any
+          return Response.json({ success: true, booking: booking || { id: bookingId, is_unlocked: 1 } })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
     // ====== CREATE CAREGIVER SUBSCRIPTION ($19.99/mo) ======
     {
       path: '/create-caregiver-subscription-checkout',
