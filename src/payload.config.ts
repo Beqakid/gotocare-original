@@ -2418,7 +2418,7 @@ Return a JSON object with these fields:
           if (!token || !bookingId) return Response.json({ error: 'token and bookingId required' }, { status: 400 })
           // Validate caregiver token
           const sessionRow = await cloudflare.env.D1.prepare(
-            'SELECT account_id FROM caregiver_sessions WHERE session_token = ?'
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!sessionRow) return Response.json({ error: 'Invalid token' }, { status: 401 })
           const caregiverId = sessionRow.account_id
