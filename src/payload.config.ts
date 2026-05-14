@@ -5292,6 +5292,18 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== VAPID PUBLIC KEY (safe to expose — public key is meant to be shared) ======
+    {
+      path: '/vapid-public-key',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        const publicKey = (cloudflare as any).env.VAPID_PUBLIC_KEY
+        if (!publicKey) return Response.json({ error: 'VAPID not configured' }, { status: 500, headers })
+        return Response.json({ publicKey }, { headers })
+      },
+    },
+
     // ====== PUSH SUBSCRIBE ======
     {
       path: '/push-subscribe',
