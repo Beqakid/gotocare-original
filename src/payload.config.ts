@@ -3610,7 +3610,7 @@ Return a JSON object with these fields:
           }
           // Verify client session
           const sess = await env.D1.prepare(
-            "SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON cs.client_email = ca.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
+            "SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
           ).bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
           // Get caregiver info
