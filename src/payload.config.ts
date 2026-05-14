@@ -3567,6 +3567,186 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== HIRE AGREEMENTS ======
+    {
+      path: '/create-hire-agreement',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          // Migrate client_team: add new columns if missing (SQLite ignores duplicate column errors)
+          for (const col of [
+            'ALTER TABLE client_team ADD COLUMN caregiver_name TEXT',
+            'ALTER TABLE client_team ADD COLUMN caregiver_photo TEXT',
+            'ALTER TABLE client_team ADD COLUMN caregiver_rate REAL',
+            'ALTER TABLE client_team ADD COLUMN care_types TEXT',
+            'ALTER TABLE client_team ADD COLUMN agreement_token TEXT',
+          ]) { try { await env.D1.prepare(col).run() } catch (_) {} }
+          // Ensure hire_agreements table exists
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS hire_agreements (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agreement_token TEXT UNIQUE NOT NULL,
+            client_email TEXT NOT NULL,
+            caregiver_id INTEGER NOT NULL,
+            caregiver_name TEXT,
+            caregiver_photo TEXT,
+            caregiver_rate REAL,
+            care_types TEXT,
+            start_date TEXT,
+            schedule_notes TEXT,
+            client_name TEXT,
+            client_signature TEXT,
+            client_signed_at TEXT,
+            caregiver_signature TEXT,
+            caregiver_signed_at TEXT,
+            status TEXT DEFAULT 'pending_caregiver',
+            created_at TEXT DEFAULT (datetime('now'))
+          )`).run()
+          const body = await req.json()
+          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, clientSignature } = body
+          if (!clientToken || !caregiverId || !clientSignature) {
+            return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
+          }
+          // Verify client session
+          const sess = await env.D1.prepare(
+            "SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON cs.client_email = ca.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
+          ).bind(clientToken).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          // Get caregiver info
+          const cg = await env.D1.prepare('SELECT id, name, photo_url, hourly_rate FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first() as any
+          if (!cg) return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404, headers })
+          const agreementToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          const now = new Date().toISOString()
+          // Insert agreement
+          await env.D1.prepare(
+            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, client_name, client_signature, client_signed_at, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
+          ).bind(
+            agreementToken, sess.email, caregiverId, cg.name, cg.photo_url || null,
+            cg.hourly_rate || 0, JSON.stringify(careTypes || []),
+            startDate || null, scheduleNotes || null,
+            sess.name || sess.email, clientSignature, now
+          ).run()
+          // Upsert into client_team with pending_agreement status
+          await env.D1.prepare(
+            `INSERT INTO client_team (client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, status, agreement_token, hired_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'pending_agreement', ?, datetime('now'))
+             ON CONFLICT(client_email, caregiver_id) DO UPDATE SET status='pending_agreement', agreement_token=excluded.agreement_token`
+          ).bind(
+            sess.email, caregiverId, cg.name, cg.photo_url || null,
+            cg.hourly_rate || 0, JSON.stringify(careTypes || []), agreementToken
+          ).run()
+          return Response.json({ success: true, agreementToken }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/sign-hire-agreement',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const body = await req.json()
+          const { token, agreementToken, caregiverSignature } = body
+          if (!token || !agreementToken || !caregiverSignature) {
+            return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
+          }
+          // Verify caregiver session
+          const sess = await env.D1.prepare(
+            "SELECT ca.id, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          // Get agreement
+          const agreement = await env.D1.prepare('SELECT * FROM hire_agreements WHERE agreement_token = ? AND caregiver_id = ?').bind(agreementToken, sess.id).first() as any
+          if (!agreement) return Response.json({ success: false, error: 'Agreement not found' }, { status: 404, headers })
+          if (agreement.status !== 'pending_caregiver') {
+            return Response.json({ success: false, error: 'Agreement already processed' }, { status: 409, headers })
+          }
+          const now = new Date().toISOString()
+          // Sign agreement
+          await env.D1.prepare(
+            "UPDATE hire_agreements SET caregiver_signature = ?, caregiver_signed_at = ?, status = 'active' WHERE agreement_token = ?"
+          ).bind(caregiverSignature, now, agreementToken).run()
+          // Activate in client_team
+          await env.D1.prepare(
+            "UPDATE client_team SET status = 'active' WHERE client_email = ? AND caregiver_id = ?"
+          ).bind(agreement.client_email, sess.id).run()
+          return Response.json({ success: true, message: 'Agreement signed. You are now hired!' }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/decline-hire-agreement',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const body = await req.json()
+          const { token, agreementToken } = body
+          if (!token || !agreementToken) return Response.json({ success: false, error: 'Missing fields' }, { status: 400, headers })
+          const sess = await env.D1.prepare(
+            "SELECT ca.id FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          const agreement = await env.D1.prepare('SELECT * FROM hire_agreements WHERE agreement_token = ? AND caregiver_id = ?').bind(agreementToken, sess.id).first() as any
+          if (!agreement) return Response.json({ success: false, error: 'Not found' }, { status: 404, headers })
+          await env.D1.prepare("UPDATE hire_agreements SET status = 'declined' WHERE agreement_token = ?").bind(agreementToken).run()
+          await env.D1.prepare("UPDATE client_team SET status = 'declined' WHERE client_email = ? AND caregiver_id = ?").bind(agreement.client_email, sess.id).run()
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/hire-agreement',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const agreementToken = url.searchParams.get('token') || ''
+          if (!agreementToken) return Response.json({ success: false, error: 'Token required' }, { status: 400, headers })
+          const agreement = await env.D1.prepare('SELECT * FROM hire_agreements WHERE agreement_token = ?').bind(agreementToken).first() as any
+          if (!agreement) return Response.json({ success: false, error: 'Not found' }, { status: 404, headers })
+          return Response.json({ success: true, agreement }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/pending-hire-offers',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ success: false, error: 'Token required' }, { status: 401, headers })
+          const sess = await env.D1.prepare(
+            "SELECT ca.id, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          const result = await env.D1.prepare(
+            "SELECT * FROM hire_agreements WHERE caregiver_id = ? AND status IN ('pending_caregiver', 'active', 'declined') ORDER BY created_at DESC LIMIT 20"
+          ).bind(sess.id).all()
+          return Response.json({ success: true, offers: result.results || [] }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+
     // ====== CAREGIVER TIME ENTRIES ======
     {
       path: '/caregiver-time-entries',
