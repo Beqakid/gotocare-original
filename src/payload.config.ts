@@ -2203,6 +2203,7 @@ Return a JSON object with these fields:
             `SELECT id, name, email, phone, bio, photo_url, zip_code, city, state,
                     languages, hourly_rate, skills, certifications, care_types, created_at
              FROM caregiver_accounts
+             WHERE email_verified = 1
              ORDER BY created_at DESC
              LIMIT ?`
           ).bind(limit).all()
@@ -2695,9 +2696,11 @@ Return a JSON object with these fields:
           const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + salt))
           const passwordHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
 
+          const verificationToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+
           await cloudflare.env.D1.prepare(
-            'INSERT INTO caregiver_accounts (email, name, password_hash, salt) VALUES (?, ?, ?, ?)'
-          ).bind(email.toLowerCase(), name || '', passwordHash, salt).run()
+            'INSERT INTO caregiver_accounts (email, name, password_hash, salt, email_verified, verification_token) VALUES (?, ?, ?, ?, 0, ?)'
+          ).bind(email.toLowerCase(), name || '', passwordHash, salt, verificationToken).run()
 
           const account = await cloudflare.env.D1.prepare(
             'SELECT id, email, name, setup_complete FROM caregiver_accounts WHERE email = ?'
@@ -2708,11 +2711,129 @@ Return a JSON object with these fields:
             "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
           ).bind(token, account.id).run()
 
+          // Send verification email via Resend
+          const verifyLink = `https://work.carehia.com?verify=${verificationToken}`
+          try {
+            await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${cloudflare.env.RESEND_API_KEY}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({
+                from: 'Carehia <hello@carehia.com>',
+                to: [email.toLowerCase()],
+                subject: 'Verify your Carehia account',
+                html: `
+                  <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; background: #0F0A1E; color: #fff; border-radius: 16px;">
+                    <div style="text-align: center; margin-bottom: 32px;">
+                      <div style="font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #7C5CFF, #4A90E2); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Carehia</div>
+                      <p style="color: #94A3B8; margin-top: 8px;">Your caregiving home base</p>
+                    </div>
+                    <h2 style="color: #fff; margin-bottom: 8px;">Welcome, ${name || 'Caregiver'}! 👋</h2>
+                    <p style="color: #CBD5E1; line-height: 1.6;">Thanks for joining Carehia. Just one step left — verify your email address to activate your account.</p>
+                    <div style="text-align: center; margin: 32px 0;">
+                      <a href="${verifyLink}" style="display: inline-block; background: linear-gradient(135deg, #7C5CFF, #4A90E2); color: #fff; text-decoration: none; padding: 14px 32px; border-radius: 50px; font-weight: 700; font-size: 16px;">Verify My Email</a>
+                    </div>
+                    <p style="color: #64748B; font-size: 13px; text-align: center;">This link expires in 24 hours. If you didn't create an account, you can ignore this email.</p>
+                    <hr style="border: none; border-top: 1px solid #1E293B; margin: 24px 0;">
+                    <p style="color: #64748B; font-size: 12px; text-align: center;">Carehia · <a href="https://carehia.com" style="color: #7C5CFF;">carehia.com</a></p>
+                  </div>
+                `,
+              }),
+            })
+          } catch (emailErr) {
+            console.error('Verification email failed:', emailErr)
+          }
+
           return Response.json({
             success: true,
             token,
+            emailVerificationRequired: true,
             account: { id: account.id, email: account.email, name: account.name, setupComplete: false },
           })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CAREGIVER VERIFY EMAIL ======
+    {
+      path: '/caregiver-verify-email',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const verifyToken = url.searchParams.get('token')
+          if (!verifyToken) return Response.json({ error: 'Verification token required' }, { status: 400 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, email, name FROM caregiver_accounts WHERE verification_token = ?'
+          ).bind(verifyToken).first()
+
+          if (!account) return Response.json({ error: 'Invalid or expired verification link. Please register again.' }, { status: 404 })
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_accounts SET email_verified = 1, verification_token = NULL WHERE id = ?'
+          ).bind(account.id).run()
+
+          return Response.json({ success: true, message: 'Email verified! Welcome to Carehia.', name: account.name })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CAREGIVER RESEND VERIFICATION EMAIL ======
+    {
+      path: '/caregiver-resend-verification',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, email, name, email_verified FROM caregiver_accounts WHERE email = ?'
+          ).bind(email.toLowerCase()).first()
+
+          if (!account) return Response.json({ error: 'No account found with that email' }, { status: 404 })
+          if (account.email_verified) return Response.json({ success: true, message: 'Account already verified' })
+
+          const newToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_accounts SET verification_token = ? WHERE id = ?'
+          ).bind(newToken, account.id).run()
+
+          const verifyLink = `https://work.carehia.com?verify=${newToken}`
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${cloudflare.env.RESEND_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: 'Carehia <hello@carehia.com>',
+              to: [email.toLowerCase()],
+              subject: 'Verify your Carehia account',
+              html: `
+                <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; background: #0F0A1E; color: #fff; border-radius: 16px;">
+                  <div style="text-align: center; margin-bottom: 32px;">
+                    <div style="font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #7C5CFF, #4A90E2); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Carehia</div>
+                  </div>
+                  <h2 style="color: #fff; margin-bottom: 8px;">Verify your email, ${account.name || 'Caregiver'}</h2>
+                  <p style="color: #CBD5E1;">Click below to verify your email and activate your Carehia account.</p>
+                  <div style="text-align: center; margin: 32px 0;">
+                    <a href="${verifyLink}" style="display: inline-block; background: linear-gradient(135deg, #7C5CFF, #4A90E2); color: #fff; text-decoration: none; padding: 14px 32px; border-radius: 50px; font-weight: 700; font-size: 16px;">Verify My Email</a>
+                  </div>
+                  <p style="color: #64748B; font-size: 12px; text-align: center;">Carehia · <a href="https://carehia.com" style="color: #7C5CFF;">carehia.com</a></p>
+                </div>
+              `,
+            }),
+          })
+          return Response.json({ success: true, message: 'Verification email sent' })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
