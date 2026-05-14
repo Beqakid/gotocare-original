@@ -3603,9 +3603,11 @@ Return a JSON object with these fields:
             status TEXT DEFAULT 'pending_caregiver',
             created_at TEXT DEFAULT (datetime('now'))
           )`).run()
+          // Add new columns if missing (v2)
+          try { await env.D1.prepare("ALTER TABLE hire_agreements ADD COLUMN hours_per_week TEXT DEFAULT ''").run() } catch(_) {}
           const body = await req.json()
-          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, clientSignature } = body
-          if (!clientToken || !caregiverId || !clientSignature) {
+          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, negotiatedRate, hoursPerWeek } = body
+          if (!clientToken || !caregiverId) {
             return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
           }
           // Verify client session
@@ -3613,30 +3615,47 @@ Return a JSON object with these fields:
             "SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
           ).bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
-          // Get caregiver info
-          const cg = await env.D1.prepare('SELECT id, name, photo_url, hourly_rate FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first() as any
+          // Get caregiver info (including email for nudge)
+          const cg = await env.D1.prepare('SELECT id, name, email, photo_url, hourly_rate FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first() as any
           if (!cg) return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404, headers })
+          const finalRate = negotiatedRate || cg.hourly_rate || 0
           const agreementToken = crypto.randomUUID() + '-' + crypto.randomUUID()
           const now = new Date().toISOString()
-          // Insert agreement
+          // Insert agreement (no client signature yet - caregiver signs first)
           await env.D1.prepare(
-            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, client_name, client_signature, client_signed_at, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
+            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, client_name, hours_per_week, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
           ).bind(
             agreementToken, sess.email, caregiverId, cg.name, cg.photo_url || null,
-            cg.hourly_rate || 0, JSON.stringify(careTypes || []),
+            finalRate, JSON.stringify(careTypes || []),
             startDate || null, scheduleNotes || null,
-            sess.name || sess.email, clientSignature, now
+            sess.name || sess.email, hoursPerWeek || ''
           ).run()
-          // Upsert into client_team with pending_agreement status
+          // Upsert into client_team
           await env.D1.prepare(
             `INSERT INTO client_team (client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, status, agreement_token, hired_at)
-             VALUES (?, ?, ?, ?, ?, ?, 'pending_agreement', ?, datetime('now'))
-             ON CONFLICT(client_email, caregiver_id) DO UPDATE SET status='pending_agreement', agreement_token=excluded.agreement_token`
+             VALUES (?, ?, ?, ?, ?, ?, 'pending_caregiver', ?, datetime('now'))
+             ON CONFLICT(client_email, caregiver_id) DO UPDATE SET status='pending_caregiver', agreement_token=excluded.agreement_token`
           ).bind(
             sess.email, caregiverId, cg.name, cg.photo_url || null,
-            cg.hourly_rate || 0, JSON.stringify(careTypes || []), agreementToken
+            finalRate, JSON.stringify(careTypes || []), agreementToken
           ).run()
+          // Nudge email to caregiver
+          const clientFirstName = (sess.name || 'A client').split(' ')[0]
+          if (cg.email) {
+            try {
+              await fetch('https://api.resend.com/emails', {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  from: 'Carehia <hello@carehia.com>',
+                  to: cg.email,
+                  subject: `New Hire Offer from ${clientFirstName} - Review on Carehia`,
+                  html: `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">You have a new hire offer!</h2><p><strong>${sess.name || 'A client'}</strong> wants to hire you on Carehia.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:16px;margin:16px 0"><p style="margin:4px 0"><strong>Rate:</strong> $${finalRate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${hoursPerWeek || 'Flexible'}</p><p style="margin:4px 0"><strong>Services:</strong> ${(careTypes || []).join(', ')}</p></div><p>Log in to review the agreement and sign it first.</p><a href="https://work.carehia.com" style="display:inline-block;background:#7C5CFF;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Review &amp; Sign Agreement</a><p style="margin-top:32px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
+                })
+              })
+            } catch(_) {}
+          }
           return Response.json({ success: true, agreementToken }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
@@ -3667,15 +3686,28 @@ Return a JSON object with these fields:
             return Response.json({ success: false, error: 'Agreement already processed' }, { status: 409, headers })
           }
           const now = new Date().toISOString()
-          // Sign agreement
+          // Caregiver signs first - move to pending_client (client must countersign)
           await env.D1.prepare(
-            "UPDATE hire_agreements SET caregiver_signature = ?, caregiver_signed_at = ?, status = 'active' WHERE agreement_token = ?"
+            "UPDATE hire_agreements SET caregiver_signature = ?, caregiver_signed_at = ?, status = 'pending_client' WHERE agreement_token = ?"
           ).bind(caregiverSignature, now, agreementToken).run()
-          // Activate in client_team
+          // Update client_team status
           await env.D1.prepare(
-            "UPDATE client_team SET status = 'active' WHERE client_email = ? AND caregiver_id = ?"
+            "UPDATE client_team SET status = 'pending_client' WHERE client_email = ? AND caregiver_id = ?"
           ).bind(agreement.client_email, sess.id).run()
-          return Response.json({ success: true, message: 'Agreement signed. You are now hired!' }, { headers })
+          // Email client to countersign
+          try {
+            await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: 'Carehia <hello@carehia.com>',
+                to: agreement.client_email,
+                subject: `${sess.name} signed your hire agreement - Your signature needed`,
+                html: `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Almost there! Your signature is needed.</h2><p><strong>${sess.name}</strong> has reviewed and signed your hire agreement on Carehia.</p><p>Please log in to review and countersign to activate your arrangement.</p><a href="https://app.carehia.com" style="display:inline-block;background:#7C5CFF;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Review &amp; Countersign</a><p style="margin-top:32px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
+              })
+            })
+          } catch(_) {}
+          return Response.json({ success: true, message: 'Agreement signed. Waiting for client countersignature.' }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
         }
@@ -3700,6 +3732,67 @@ Return a JSON object with these fields:
           await env.D1.prepare("UPDATE hire_agreements SET status = 'declined' WHERE agreement_token = ?").bind(agreementToken).run()
           await env.D1.prepare("UPDATE client_team SET status = 'declined' WHERE client_email = ? AND caregiver_id = ?").bind(agreement.client_email, sess.id).run()
           return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/client-sign-hire-agreement',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const body = await req.json()
+          const { agreementToken, clientSignature, clientToken } = body
+          if (!agreementToken || !clientSignature || !clientToken) {
+            return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
+          }
+          const sess = await env.D1.prepare(
+            "SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
+          ).bind(clientToken).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          const agreement = await env.D1.prepare(
+            "SELECT * FROM hire_agreements WHERE agreement_token = ? AND client_email = ? AND status = 'pending_client'"
+          ).bind(agreementToken, sess.email).first() as any
+          if (!agreement) return Response.json({ success: false, error: 'Agreement not found or not ready for your signature' }, { status: 404, headers })
+          const now = new Date().toISOString()
+          await env.D1.prepare(
+            "UPDATE hire_agreements SET client_signature = ?, client_signed_at = ?, status = 'active' WHERE agreement_token = ?"
+          ).bind(clientSignature, now, agreementToken).run()
+          await env.D1.prepare(
+            "UPDATE client_team SET status = 'active' WHERE client_email = ? AND caregiver_id = ?"
+          ).bind(sess.email, agreement.caregiver_id).run()
+          const cg2 = await env.D1.prepare('SELECT name, email FROM caregiver_accounts WHERE id = ?').bind(agreement.caregiver_id).first() as any
+          const careTypesStr = (() => { try { return JSON.parse(agreement.care_types || '[]').join(', ') } catch(e) { return agreement.care_types || '' } })()
+          const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
+          try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: sess.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {}
+          if (cg2?.email) { try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: cg2.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {} }
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+    {
+      path: '/pending-client-agreements',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const clientToken = url.searchParams.get('clientToken') || ''
+          if (!clientToken) return Response.json({ success: false, error: 'clientToken required' }, { status: 400, headers })
+          const sess = await env.D1.prepare(
+            "SELECT ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')"
+          ).bind(clientToken).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          const result = await env.D1.prepare(
+            "SELECT * FROM hire_agreements WHERE client_email = ? AND status = 'pending_client' ORDER BY caregiver_signed_at DESC"
+          ).bind(sess.email).all()
+          return Response.json({ success: true, agreements: result.results || [] }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
         }
