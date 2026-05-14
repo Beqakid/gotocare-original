@@ -1578,6 +1578,28 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
       handler: async (req) => {
         try {
           const body = await req.text()
+
+          // Verify Stripe signature (if STRIPE_WEBHOOK_SECRET is configured)
+          const webhookSecret = cloudflare.env.STRIPE_WEBHOOK_SECRET
+          if (webhookSecret) {
+            const sig = req.headers.get('stripe-signature') || ''
+            const tPart = sig.split(',').find((p: string) => p.startsWith('t='))?.slice(2)
+            const v1Part = sig.split(',').find((p: string) => p.startsWith('v1='))?.slice(3)
+            if (!tPart || !v1Part) {
+              return Response.json({ error: 'Missing Stripe signature' }, { status: 400 })
+            }
+            const encoder = new TextEncoder()
+            const key = await crypto.subtle.importKey(
+              'raw', encoder.encode(webhookSecret),
+              { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+            )
+            const sigBytes = await crypto.subtle.sign('HMAC', key, encoder.encode(`${tPart}.${body}`))
+            const computed = Array.from(new Uint8Array(sigBytes)).map(b => b.toString(16).padStart(2,'0')).join('')
+            if (computed !== v1Part) {
+              return Response.json({ error: 'Invalid Stripe signature' }, { status: 400 })
+            }
+          }
+
           const event = JSON.parse(body)
           if (event.type === 'checkout.session.completed') {
             const session = event.data.object
