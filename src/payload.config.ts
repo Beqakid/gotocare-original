@@ -3366,7 +3366,34 @@ Return a JSON object with these fields:
             })
           }
 
-          return Response.json({ success: true, hired, active, past, email: clientEmail })
+          // ── 4. Pending hire agreements (pending_caregiver / pending_client) ──
+          const pendingRows = await cloudflare.env.D1.prepare(
+            "SELECT ct.*, ca.name as cg_name, ca.email as cg_email, ca.photo_url as cg_photo, ca.hourly_rate as cg_rate, ca.skills as cg_skills, ca.care_types as cg_care_types FROM client_team ct LEFT JOIN caregiver_accounts ca ON ca.id = ct.caregiver_id WHERE ct.client_email = ? AND ct.status IN ('pending_caregiver', 'pending_client') ORDER BY ct.hired_at DESC"
+          ).bind(clientEmail).all()
+
+          const pending: any[] = []
+          for (const row of (pendingRows.results || []) as any[]) {
+            const parseJSONp = (v: any) => { try { return JSON.parse(v) } catch { return [] } }
+            const pSkills = row.cg_skills ? parseJSONp(row.cg_skills) : []
+            const pCareTypes = row.cg_care_types ? parseJSONp(row.cg_care_types) : []
+            pending.push({
+              id: row.caregiver_id,
+              caregiver_id: row.caregiver_id,
+              name: row.cg_name || row.caregiver_name || 'Caregiver',
+              caregiver_name: row.cg_name || row.caregiver_name || 'Caregiver',
+              email: row.cg_email || '',
+              photoUrl: row.cg_photo || null,
+              hourlyRate: row.cg_rate || row.caregiver_rate || 28,
+              caregiver_rate: row.cg_rate || row.caregiver_rate || 28,
+              specialty: pSkills.length > 0 ? pSkills[0] : (pCareTypes.length > 0 ? pCareTypes[0] : row.care_types || 'Home Care'),
+              care_types: row.care_types || '',
+              hiredAt: row.hired_at,
+              status: row.status,
+              agreement_token: row.agreement_token,
+            })
+          }
+
+          return Response.json({ success: true, hired, active, past, pending, email: clientEmail })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
@@ -3856,7 +3883,7 @@ Return a JSON object with these fields:
                 from: 'Carehia <hello@carehia.com>',
                 to: agreement.client_email,
                 subject: `${sess.name} signed your hire agreement - Your signature needed`,
-                html: `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Almost there! Your signature is needed.</h2><p><strong>${sess.name}</strong> has reviewed and signed your hire agreement on Carehia.</p><p>Please log in to review and countersign to activate your arrangement.</p><a href="https://app.carehia.com" style="display:inline-block;background:#7C5CFF;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Review &amp; Countersign</a><p style="margin-top:32px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
+                html: `<div style="font-family:sans-serif;max-width:520px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Almost there! Your signature is needed.</h2><p><strong>${sess.name}</strong> has reviewed and signed your hire agreement on Carehia.</p><p>Please log in to review and countersign to activate your arrangement.</p><a href="https://app.carehia.com" style="display:inline-block;background:#7C5CFF;color:#fff;padding:14px 28px;border-radius:8px;text-decoration:none;font-weight:600;margin-top:8px">Review &amp; Countersign</a><p style="margin-top:16px;font-size:13px"><a href="https://gotocare-original.jjioji.workers.dev/api/hire-agreement?token=${agreementToken}&format=html" style="color:#7C5CFF">View &amp; Print Agreement →</a></p><p style="margin-top:32px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
               })
             })
           } catch(_) {}
@@ -3919,10 +3946,10 @@ Return a JSON object with these fields:
           ).bind(sess.email, agreement.caregiver_id).run()
           const cg2 = await env.D1.prepare('SELECT name, email FROM caregiver_accounts WHERE id = ?').bind(agreement.caregiver_id).first() as any
           const careTypesStr = (() => { try { return JSON.parse(agreement.care_types || '[]').join(', ') } catch(e) { return agreement.care_types || '' } })()
-          const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
+          const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="margin-top:16px"><a href="https://gotocare-original.jjioji.workers.dev/api/hire-agreement?token=${agreementToken}&format=html" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">🖨️ Download / Print Signed Agreement</a></p><p style="margin-top:24px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
           try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: sess.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {}
           if (cg2?.email) { try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: cg2.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {} }
-          return Response.json({ success: true }, { headers })
+          return Response.json({ success: true, agreementToken }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
         }
@@ -3963,6 +3990,16 @@ Return a JSON object with these fields:
           if (!agreementToken) return Response.json({ success: false, error: 'Token required' }, { status: 400, headers })
           const agreement = await env.D1.prepare('SELECT * FROM hire_agreements WHERE agreement_token = ?').bind(agreementToken).first() as any
           if (!agreement) return Response.json({ success: false, error: 'Not found' }, { status: 404, headers })
+
+          // ── Printable HTML page ──────────────────────────────────────────────
+          const format = url.searchParams.get('format')
+          if (format === 'html') {
+            const careTypesStr2 = (() => { try { return JSON.parse(agreement.care_types || '[]').join(', ') } catch { return agreement.care_types || '' } })()
+            const isFullySigned = agreement.status === 'active'
+            const htmlPage = `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Hire Agreement - Carehia</title><style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#F8FAFC;color:#0F172A;padding:0}.page{max-width:680px;margin:0 auto;background:#fff;min-height:100vh;padding:48px 32px}@media(max-width:640px){.page{padding:32px 20px}}.header{text-align:center;margin-bottom:40px}.logo{font-size:24px;font-weight:900;background:linear-gradient(135deg,#7C5CFF,#4A90E2);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:4px}.badge{display:inline-block;background:${isFullySigned ? '#F0FDF4' : '#FEF9C3'};color:${isFullySigned ? '#166534' : '#92400E'};border:1px solid ${isFullySigned ? '#BBF7D0' : '#FDE68A'};border-radius:20px;padding:4px 14px;font-size:13px;font-weight:700;margin-top:8px}.title{font-size:22px;font-weight:800;margin-top:20px;color:#0F172A}.section{background:#F8FAFC;border:1.5px solid #E2E8F0;border-radius:14px;padding:22px;margin-bottom:20px}.section-title{font-size:12px;font-weight:700;color:#94A3B8;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:14px}.row{display:flex;justify-content:space-between;align-items:baseline;padding:6px 0;border-bottom:1px solid #E2E8F0}.row:last-child{border-bottom:none}.row-label{font-size:13px;color:#64748B}.row-value{font-size:14px;font-weight:600;color:#0F172A}.sig-box{background:#FAFAFA;border:2px solid #E2E8F0;border-radius:10px;padding:16px;margin-top:8px}.sig-name{font-size:20px;font-family:Georgia,serif;font-style:italic;color:#0F172A}.sig-ts{font-size:11px;color:#94A3B8;margin-top:4px}.footer{text-align:center;margin-top:40px;padding-top:24px;border-top:1px solid #E2E8F0;font-size:12px;color:#94A3B8}.print-btn{display:block;width:100%;padding:16px;background:linear-gradient(135deg,#7C5CFF,#4A90E2);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:700;cursor:pointer;margin-bottom:24px;text-align:center}@media print{.print-btn{display:none}.page{padding:20px}}</style></head><body><div class="page"><div class="header"><div class="logo">Carehia</div><div class="title">Hire Agreement</div><div class="badge">${isFullySigned ? '✅ Fully Executed' : '⏳ Awaiting Signatures'}</div></div><div class="section"><div class="section-title">Agreement Details</div><div class="row"><span class="row-label">Caregiver</span><span class="row-value">${agreement.caregiver_name || 'N/A'}</span></div><div class="row"><span class="row-label">Client</span><span class="row-value">${agreement.client_name || 'N/A'}</span></div><div class="row"><span class="row-label">Hourly Rate</span><span class="row-value" style="color:#7C5CFF">$${agreement.caregiver_rate}/hr</span></div><div class="row"><span class="row-label">Hours / Week</span><span class="row-value">${agreement.hours_per_week || 'As discussed'}</span></div>${agreement.start_date ? `<div class="row"><span class="row-label">Start Date</span><span class="row-value">${agreement.start_date}</span></div>` : ''}${careTypesStr2 ? `<div class="row"><span class="row-label">Care Services</span><span class="row-value">${careTypesStr2}</span></div>` : ''}${agreement.schedule_notes ? `<div class="row"><span class="row-label">Schedule Notes</span><span class="row-value">${agreement.schedule_notes}</span></div>` : ''}</div><div class="section"><div class="section-title">Caregiver Signature</div>${agreement.caregiver_signature ? `<div class="sig-box"><div class="sig-name">${agreement.caregiver_signature}</div><div class="sig-ts">Signed digitally on ${new Date(agreement.caregiver_signed_at).toLocaleString('en-US',{dateStyle:'long',timeStyle:'short'})}</div></div>` : '<div style="color:#94A3B8;font-size:13px;padding:8px 0">Not yet signed</div>'}</div><div class="section"><div class="section-title">Client Signature</div>${agreement.client_signature ? `<div class="sig-box"><div class="sig-name">${agreement.client_signature}</div><div class="sig-ts">Signed digitally on ${new Date(agreement.client_signed_at).toLocaleString('en-US',{dateStyle:'long',timeStyle:'short'})}</div></div>` : '<div style="color:#94A3B8;font-size:13px;padding:8px 0">Not yet signed</div>'}</div><button class="print-btn" onclick="window.print()">🖨️ Print / Save as PDF</button><div class="footer"><p>This document was generated by Carehia and serves as a legally binding digital hire agreement.</p><p style="margin-top:6px">Questions? <a href="mailto:support@carehia.com" style="color:#7C5CFF">support@carehia.com</a></p></div></div></body></html>`
+            return new Response(htmlPage, { headers: { 'Content-Type': 'text/html', 'Access-Control-Allow-Origin': '*' } })
+          }
+
           return Response.json({ success: true, agreement }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
