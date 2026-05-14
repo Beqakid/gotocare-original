@@ -5185,9 +5185,9 @@ Return a JSON object with these fields:
           const url = new URL(req.url||'','http://x'); const token = url.searchParams.get('token')
           if (!token) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           const {results:cgRows}=await db.prepare(`SELECT * FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
           const cg=(cgRows as any[])[0]; if(!cg) return Response.json({ error:'Not found' }, { status:404, headers })
           await db.prepare(`UPDATE dispatch_notifications SET status='viewed',viewed_at=datetime('now') WHERE caregiver_id=? AND status='sent'`).bind(caregiverId).run()
@@ -5223,9 +5223,9 @@ Return a JSON object with these fields:
           const { token, request_id } = body
           if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           const {results:dn}=await db.prepare(`SELECT * FROM dispatch_notifications WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).all()
           if (!(dn as any[])[0]) return Response.json({ error: 'Not dispatched to you' }, { status: 403, headers })
           const result=await db.prepare(`UPDATE care_requests SET status='accepted',accepted_caregiver_id=?,accepted_at=datetime('now') WHERE id=? AND status IN ('pending','dispatching')`).bind(caregiverId,request_id).run()
@@ -5259,9 +5259,9 @@ Return a JSON object with these fields:
           const { token, request_id } = body
           if (!token||!request_id) return Response.json({ error: 'token and request_id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           await db.prepare(`UPDATE dispatch_notifications SET status='declined',responded_at=datetime('now') WHERE request_id=? AND caregiver_id=?`).bind(request_id,caregiverId).run()
           await db.prepare(`UPDATE care_requests SET caregivers_declined=caregivers_declined+1 WHERE id=?`).bind(request_id).run()
           await db.prepare(`INSERT INTO caregiver_response_metrics (caregiver_id,total_requests,accepted,avg_response_minutes,updated_at) VALUES (?,1,0,5,datetime('now')) ON CONFLICT(caregiver_id) DO UPDATE SET total_requests=total_requests+1,updated_at=datetime('now')`).bind(caregiverId).run()
@@ -5281,9 +5281,9 @@ Return a JSON object with these fields:
           const { token, is_online } = body
           if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           const {results:cgRows}=await db.prepare(`SELECT zip_code FROM caregiver_accounts WHERE id=?`).bind(caregiverId).all()
           const zip=(cgRows as any[])[0]?.zip_code||''
           await db.prepare(`INSERT OR REPLACE INTO caregiver_online_status (caregiver_id,is_online,zip_code,last_seen,updated_at) VALUES (?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,is_online?1:0,zip).run()
@@ -5315,9 +5315,9 @@ Return a JSON object with these fields:
           const { token, endpoint, p256dh, auth, user_agent } = body
           if (!token||!endpoint) return Response.json({ error: 'token and endpoint required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           await db.prepare(`INSERT OR REPLACE INTO push_subscriptions (caregiver_id,endpoint,p256dh,auth,user_agent,created_at,last_used_at) VALUES (?,?,?,?,?,datetime('now'),datetime('now'))`).bind(caregiverId,endpoint,p256dh||null,auth||null,user_agent||null).run()
           return Response.json({ success:true, message:'Push subscription saved.' }, { headers })
         } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
@@ -5335,9 +5335,9 @@ Return a JSON object with these fields:
           const { token } = body
           if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          await db.prepare(`DELETE FROM push_subscriptions WHERE caregiver_id=?`).bind((sess as any[])[0].caregiver_id).run()
+          await db.prepare(`DELETE FROM push_subscriptions WHERE caregiver_id=?`).bind((sess as any[])[0].account_id).run()
           return Response.json({ success:true }, { headers })
         } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
       },
@@ -5354,9 +5354,9 @@ Return a JSON object with these fields:
           const { token } = body
           if (!token) return Response.json({ error: 'token required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1; const env = (cloudflare as any).env
-          const {results:sess}=await db.prepare(`SELECT caregiver_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
+          const {results:sess}=await db.prepare(`SELECT account_id FROM caregiver_sessions WHERE token=?`).bind(token).all()
           if (!(sess as any[])[0]) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
-          const caregiverId=(sess as any[])[0].caregiver_id
+          const caregiverId=(sess as any[])[0].account_id
           const sent=await _sendPushBatch(db,[caregiverId],env.VAPID_PUBLIC_KEY,env.VAPID_PRIVATE_KEY)
           return Response.json({ success:true, sent, message:sent>0?'Test notification sent!':'No push subscription found. Enable notifications first.' }, { headers })
         } catch (error) { return Response.json({ error: String(error) }, { status: 500, headers }) }
