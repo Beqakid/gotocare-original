@@ -3949,6 +3949,33 @@ Return a JSON object with these fields:
           const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="margin-top:16px"><a href="https://gotocare-original.jjioji.workers.dev/api/hire-agreement?token=${agreementToken}&format=html" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">🖨️ Download / Print Signed Agreement</a></p><p style="margin-top:24px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
           try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: sess.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {}
           if (cg2?.email) { try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: cg2.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {} }
+          // Auto-populate care_schedules + caregiver_private_clients from signed hire agreement
+          try {
+            const schedNotes = agreement.schedule_notes || ''
+            const dayNameMap: Record<string,string> = { 'Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed','Thursday':'Thu','Friday':'Fri','Saturday':'Sat','Sunday':'Sun' }
+            const dayMatch = schedNotes.match(/Days:\s*([^\n]+)/)
+            const hrMatch = schedNotes.match(/Hours:\s*(\d{1,2}:\d{2})\s*[–-]\s*(\d{1,2}:\d{2})/)
+            const parsedDays = dayMatch ? dayMatch[1].split(',').map((d: string) => dayNameMap[d.trim()] || d.trim()).join(',') : ''
+            const parsedStart = hrMatch ? hrMatch[1] : ''
+            const parsedEnd = hrMatch ? hrMatch[2] : ''
+            let careTypesList: string[] = []
+            try { careTypesList = JSON.parse(agreement.care_types || '[]') } catch (_) {}
+            const careTypeFirst = careTypesList[0] || ''
+            const cgEmail2 = cg2?.email || ''
+            if (parsedDays && parsedStart && parsedEnd && cgEmail2) {
+              const existingSched = await env.D1.prepare('SELECT id FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(agreement.client_email, cgEmail2).first()
+              if (!existingSched) {
+                await env.D1.prepare('INSERT INTO care_schedules (client_email, caregiver_email, days, start_time, end_time, care_type, notes, is_recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(agreement.client_email, cgEmail2, parsedDays, parsedStart, parsedEnd, careTypeFirst, schedNotes).run()
+              }
+            }
+            if (cgEmail2 && agreement.client_email) {
+              const existingPc = await env.D1.prepare('SELECT id FROM caregiver_private_clients WHERE caregiver_email = ? AND email = ?').bind(cgEmail2, agreement.client_email).first()
+              if (!existingPc) {
+                const cgRate2 = parseFloat(String(agreement.caregiver_rate)) || 25
+                await env.D1.prepare("INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type) VALUES (?, ?, ?, ?, ?, ?, 'hourly')").bind(cgEmail2, agreement.client_name || agreement.client_email.split('@')[0], agreement.client_email, '', cgRate2, careTypeFirst).run()
+              }
+            }
+          } catch (_autoErr: any) { /* non-blocking — don't fail the agreement */ }
           return Response.json({ success: true, agreementToken }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
@@ -5766,5 +5793,30 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ====== CAREGIVER WORK SCHEDULE (from signed hire agreements, read-only) ======
+    {
+      path: '/caregiver-work-schedule',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
+          const cgAcc = await env.D1.prepare('SELECT email, name FROM caregiver_accounts WHERE id = ?').bind(sess.account_id).first() as any
+          if (!cgAcc) return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404, headers })
+          const { results: scheds } = await env.D1.prepare(
+            'SELECT cs.*, COALESCE(ca.name, cs.client_email) as client_display_name FROM care_schedules cs LEFT JOIN client_accounts ca ON ca.email = cs.client_email WHERE cs.caregiver_email = ? ORDER BY cs.id DESC'
+          ).bind(cgAcc.email).all()
+          return Response.json({ success: true, schedules: scheds || [] }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
   ],
 })
