@@ -2849,6 +2849,13 @@ Return a JSON object with these fields:
           ).bind(session.account_id).first()
           if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
 
+          const reviewStats = await cloudflare.env.D1.prepare(
+            'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1'
+          ).bind(session.account_id).first() as any
+          const jobStats = await cloudflare.env.D1.prepare(
+            'SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ?'
+          ).bind(session.account_id).first() as any
+
           return Response.json({
             success: true,
             account: {
@@ -2867,6 +2874,9 @@ Return a JSON object with these fields:
               hourlyRate: account.hourly_rate || 0,
               skills: account.skills ? (() => { try { return JSON.parse(account.skills) } catch { return [] } })() : [],
               certifications: account.certifications ? (() => { try { return JSON.parse(account.certifications) } catch { return [] } })() : [],
+              avgRating: reviewStats?.avg_rating ? Math.round(reviewStats.avg_rating * 10) / 10 : null,
+              reviewCount: reviewStats?.review_count || 0,
+              totalJobs: jobStats?.cnt || 0,
             },
           })
         } catch (error) {
