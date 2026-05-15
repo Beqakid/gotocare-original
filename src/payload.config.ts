@@ -2229,7 +2229,24 @@ Return a JSON object with these fields:
              ORDER BY created_at DESC
              LIMIT ?`
           ).bind(limit).all()
-          const mapped = (rows || []).map((cg: any) => {
+          // ---- Profile completeness gate (70%) ----
+          // Scoring matches frontend calculateCompleteness in utils/storage.ts (10 items × 10%)
+          const calcProfileCompleteness = (cg: any) => {
+            let s = 0
+            if (cg.name && cg.name.trim()) s += 10
+            if (cg.photo_url) s += 10
+            if (cg.bio && cg.bio.length > 20) s += 10
+            if (cg.hourly_rate && parseFloat(String(cg.hourly_rate)) > 0) s += 10
+            try { if (JSON.parse(cg.skills || '[]').length >= 3) s += 10 } catch {}
+            if (cg.phone) s += 10
+            if (cg.city) s += 10
+            try { if (JSON.parse(cg.languages || '[]').length > 0) s += 10 } catch {}
+            try { if (JSON.parse(cg.certifications || '[]').length > 0) s += 10 } catch {}
+            try { if (JSON.parse(cg.care_types || '[]').length > 0) s += 10 } catch {}
+            return s
+          }
+          const filteredRows = (rows || []).filter((cg: any) => calcProfileCompleteness(cg) >= 70)
+          const mapped = filteredRows.map((cg: any) => {
             const nameParts = (cg.name || 'Caregiver').trim().split(' ')
             const firstName = nameParts[0] || 'Caregiver'
             const lastName = nameParts.slice(1).join(' ') || ''
@@ -2999,6 +3016,21 @@ Return a JSON object with these fields:
             'SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ?'
           ).bind(session.account_id).first() as any
 
+          // ---- Profile completeness calculation (mirrors frontend storage.ts) ----
+          const acct = account as any
+          const missingFields: string[] = []
+          let completenessScore = 0
+          if (acct.name && acct.name.trim()) completenessScore += 10; else missingFields.push('Full name')
+          if (acct.photo_url) completenessScore += 10; else missingFields.push('Profile photo')
+          if (acct.bio && acct.bio.length > 20) completenessScore += 10; else missingFields.push('Bio (min 20 chars)')
+          if (acct.hourly_rate && parseFloat(String(acct.hourly_rate)) > 0) completenessScore += 10; else missingFields.push('Hourly rate')
+          try { if (JSON.parse(acct.skills || '[]').length >= 3) completenessScore += 10; else missingFields.push('Skills (add 3 or more)') } catch { missingFields.push('Skills') }
+          if (acct.phone) completenessScore += 10; else missingFields.push('Phone number')
+          if (acct.city) completenessScore += 10; else missingFields.push('City / location')
+          try { if (JSON.parse(acct.languages || '[]').length > 0) completenessScore += 10 } catch {}
+          try { if (JSON.parse(acct.certifications || '[]').length > 0) completenessScore += 10; else missingFields.push('A certification or license') } catch { missingFields.push('A certification or license') }
+          try { if (JSON.parse(acct.care_types || '[]').length > 0) completenessScore += 10; else missingFields.push('Care specialties') } catch { missingFields.push('Care specialties') }
+
           return Response.json({
             success: true,
             account: {
@@ -3020,6 +3052,9 @@ Return a JSON object with these fields:
               avgRating: reviewStats?.avg_rating ? Math.round(reviewStats.avg_rating * 10) / 10 : null,
               reviewCount: reviewStats?.review_count || 0,
               totalJobs: jobStats?.cnt || 0,
+              completenessScore,
+              missingFields,
+              isVisibleInSearch: completenessScore >= 70,
             },
           })
         } catch (error) {
