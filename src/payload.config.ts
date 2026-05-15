@@ -2725,6 +2725,19 @@ Return a JSON object with these fields:
           if (!email) return Response.json({ error: 'email required' }, { status: 400 })
           if (!password) return Response.json({ error: 'password required' }, { status: 400 })
 
+          // ---- Rate limiting: 5 registrations per IP per hour ----
+          const cgRegIP = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'unknown'
+          const cgRegWindow = Math.floor(Date.now() / 1000) - 3600
+          const cgRegAttempts = await cloudflare.env.D1.prepare(
+            'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ? AND endpoint = ? AND attempted_at > ?'
+          ).bind(cgRegIP, 'caregiver-register', cgRegWindow).first() as any
+          if ((cgRegAttempts?.cnt || 0) >= 5) {
+            return Response.json({ error: 'Too many registration attempts from this network. Please try again in an hour.' }, { status: 429 })
+          }
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO login_attempts (ip, endpoint, email, attempted_at, success) VALUES (?, ?, ?, ?, 1)'
+          ).bind(cgRegIP, 'caregiver-register', email.toLowerCase(), Math.floor(Date.now() / 1000)).run().catch(() => {})
+
           const existing = await cloudflare.env.D1.prepare(
             'SELECT id FROM caregiver_accounts WHERE email = ?'
           ).bind(email.toLowerCase()).first()
@@ -2889,15 +2902,28 @@ Return a JSON object with these fields:
           const { email, password } = body
           if (!email || !password) return Response.json({ error: 'email and password required' }, { status: 400 })
 
+          // ---- Rate limiting: 10 failed attempts per IP per 15 min ----
+          const cgLoginIP = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'unknown'
+          const cgLoginWindow = Math.floor(Date.now() / 1000) - 900
+          const cgLoginAttempts = await cloudflare.env.D1.prepare(
+            'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ? AND endpoint = ? AND attempted_at > ? AND success = 0'
+          ).bind(cgLoginIP, 'caregiver-login', cgLoginWindow).first() as any
+          if ((cgLoginAttempts?.cnt || 0) >= 10) {
+            return Response.json({ error: 'Too many failed login attempts. Please try again in 15 minutes.' }, { status: 429 })
+          }
+          const recordCgLoginFail = () => cloudflare.env.D1.prepare(
+            'INSERT INTO login_attempts (ip, endpoint, email, attempted_at, success) VALUES (?, ?, ?, ?, 0)'
+          ).bind(cgLoginIP, 'caregiver-login', email.toLowerCase(), Math.floor(Date.now() / 1000)).run().catch(() => {})
+
           const account = await cloudflare.env.D1.prepare(
             "SELECT * FROM caregiver_accounts WHERE email = ? AND status = 'active'"
           ).bind(email.toLowerCase()).first()
-          if (!account) return Response.json({ error: 'Invalid email or password' }, { status: 401 })
+          if (!account) { await recordCgLoginFail(); return Response.json({ error: 'Invalid email or password' }, { status: 401 }) }
 
           const enc = new TextEncoder()
           const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + account.salt))
           const passwordHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
-          if (passwordHash !== account.password_hash) return Response.json({ error: 'Invalid email or password' }, { status: 401 })
+          if (passwordHash !== account.password_hash) { await recordCgLoginFail(); return Response.json({ error: 'Invalid email or password' }, { status: 401 }) }
 
           const token = crypto.randomUUID() + '-' + crypto.randomUUID()
           await cloudflare.env.D1.prepare(
@@ -3190,15 +3216,28 @@ Return a JSON object with these fields:
           const { email, password } = body
           if (!email || !password) return Response.json({ error: 'email and password required' }, { status: 400 })
 
+          // ---- Rate limiting: 10 failed attempts per IP per 15 min ----
+          const clLoginIP = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'unknown'
+          const clLoginWindow = Math.floor(Date.now() / 1000) - 900
+          const clLoginAttempts = await cloudflare.env.D1.prepare(
+            'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ? AND endpoint = ? AND attempted_at > ? AND success = 0'
+          ).bind(clLoginIP, 'client-login', clLoginWindow).first() as any
+          if ((clLoginAttempts?.cnt || 0) >= 10) {
+            return Response.json({ error: 'Too many failed login attempts. Please try again in 15 minutes.' }, { status: 429 })
+          }
+          const recordClLoginFail = () => cloudflare.env.D1.prepare(
+            'INSERT INTO login_attempts (ip, endpoint, email, attempted_at, success) VALUES (?, ?, ?, ?, 0)'
+          ).bind(clLoginIP, 'client-login', email.toLowerCase(), Math.floor(Date.now() / 1000)).run().catch(() => {})
+
           const account = await cloudflare.env.D1.prepare(
             'SELECT * FROM client_accounts WHERE email = ?'
           ).bind(email.toLowerCase()).first() as any
-          if (!account) return Response.json({ error: 'No account found. Please register first.' }, { status: 404 })
+          if (!account) { await recordClLoginFail(); return Response.json({ error: 'No account found. Please register first.' }, { status: 404 }) }
 
           const enc = new TextEncoder()
           const hashBuffer = await crypto.subtle.digest('SHA-256', enc.encode(password + account.salt))
           const passwordHash = Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('')
-          if (passwordHash !== account.password_hash) return Response.json({ error: 'Incorrect password.' }, { status: 401 })
+          if (passwordHash !== account.password_hash) { await recordClLoginFail(); return Response.json({ error: 'Incorrect password.' }, { status: 401 }) }
 
           const sessionToken = crypto.randomUUID() + '-' + crypto.randomUUID()
           const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
