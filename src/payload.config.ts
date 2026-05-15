@@ -5794,6 +5794,122 @@ Return a JSON object with these fields:
     },
 
 
+    // ====== VERIFICATION — STATUS (GET all records for logged-in caregiver) ======
+    {
+      path: '/verification-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
+          const cgId = sess.account_id
+          const { results: verifications } = await env.D1.prepare(
+            'SELECT id, doc_type, status, submitted_at, reviewed_at, approved_at, rejection_reason, admin_notes, file_name, consent_given FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY submitted_at DESC'
+          ).bind(cgId).all()
+          // Also get trust score
+          const trust = await env.D1.prepare('SELECT * FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(cgId).first() as any
+          // Get background check status
+          const bgCheck = await env.D1.prepare('SELECT * FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first() as any
+          return Response.json({ success: true, verifications: verifications || [], trust: trust || null, backgroundCheck: bgCheck || null }, { headers })
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+
+    // ====== VERIFICATION — UPLOAD DOCUMENT (POST multipart) ======
+    {
+      path: '/verification-upload',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          let token: string, docType: string, consentGiven: number, file: File | null
+          try {
+            const fd = await req.formData()
+            token = fd.get('token') || ''
+            docType = fd.get('doc_type') || 'id_front'
+            consentGiven = fd.get('consent_given') === 'true' ? 1 : 0
+            file = fd.get('file') || null
+          } catch {
+            const body = await req.json().catch(() => ({})) as any
+            token = body.token || ''
+            docType = body.doc_type || 'background_consent'
+            consentGiven = body.consent_given ? 1 : 0
+            file = null
+          }
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
+          if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
+          const cgId = sess.account_id
+          let r2Key: string | null = null
+          let fileName: string | null = null
+          let mimeType: string | null = null
+          // Upload file to R2 if provided
+          if (file && env.R2) {
+            const uuid = crypto.randomUUID()
+            fileName = (file as any).name || `doc_${Date.now()}`
+            mimeType = (file as any).type || 'application/octet-stream'
+            r2Key = `verifications/${cgId}/${uuid}/${fileName}`
+            const arrayBuffer = await (file as any).arrayBuffer()
+            await env.R2.put(r2Key, arrayBuffer, { httpMetadata: { contentType: mimeType } })
+          }
+          // Upsert verification record (one per doc_type per caregiver — replace existing pending/rejected)
+          const existing = await env.D1.prepare('SELECT id FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type = ? AND status IN (\'pending\', \'rejected\')').bind(cgId, docType).first() as any
+          if (existing) {
+            await env.D1.prepare(
+              'UPDATE caregiver_verifications SET status=\'pending\', r2_key=COALESCE(?,r2_key), file_name=COALESCE(?,file_name), mime_type=COALESCE(?,mime_type), consent_given=?, submitted_at=datetime(\'now\'), admin_notes=NULL, rejection_reason=NULL, reviewer_email=NULL, approved_at=NULL WHERE id=?'
+            ).bind(r2Key, fileName, mimeType, consentGiven, existing.id).run()
+            // Audit log
+            await env.D1.prepare('INSERT INTO verification_audit_logs (caregiver_id, verification_id, action, notes) VALUES (?,?,?,?)').bind(cgId, existing.id, 'resubmitted', docType).run()
+            return Response.json({ success: true, id: existing.id, r2Key, docType, status: 'pending' }, { headers })
+          } else {
+            const result = await env.D1.prepare(
+              'INSERT INTO caregiver_verifications (caregiver_id, doc_type, r2_key, file_name, mime_type, consent_given, status, submitted_at) VALUES (?,?,?,?,?,?,\'pending\',datetime(\'now\'))'
+            ).bind(cgId, docType, r2Key, fileName, mimeType, consentGiven).run() as any
+            const newId = result.meta?.last_row_id
+            // Audit log
+            await env.D1.prepare('INSERT INTO verification_audit_logs (caregiver_id, verification_id, action, notes) VALUES (?,?,?,?)').bind(cgId, newId, 'submitted', docType).run()
+            return Response.json({ success: true, id: newId, r2Key, docType, status: 'pending' }, { headers })
+          }
+        } catch (e: any) {
+          return Response.json({ success: false, error: e.message }, { headers })
+        }
+      },
+    },
+
+    // ====== ADMIN DOC VIEW — proxy R2 document for admin (r2Key + adminToken) ======
+    {
+      path: '/admin-doc-view',
+      method: 'get',
+      handler: async (req: any) => {
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('adminToken') || ''
+          const r2Key = url.searchParams.get('r2Key') || ''
+          if (!adminToken || !r2Key) return new Response('Missing params', { status: 400 })
+          // Validate admin
+          const sess = await env.D1.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return new Response('Unauthorized', { status: 403 })
+          // Check key is a verifications/ key (security guard)
+          if (!r2Key.startsWith('verifications/')) return new Response('Forbidden', { status: 403 })
+          const obj = await env.R2.get(r2Key)
+          if (!obj) return new Response('Not found', { status: 404 })
+          const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
+          return new Response(obj.body, { headers: { 'Content-Type': contentType, 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'private, max-age=900' } })
+        } catch (e: any) {
+          return new Response(e.message, { status: 500 })
+        }
+      },
+    },
+
     // ====== CAREGIVER WORK SCHEDULE (from signed hire agreements, read-only) ======
     {
       path: '/caregiver-work-schedule',
