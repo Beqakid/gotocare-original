@@ -2892,6 +2892,109 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== CAREGIVER FORGOT PASSWORD ======
+    {
+      path: '/caregiver-forgot-password',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+
+          const account = await cloudflare.env.D1.prepare(
+            'SELECT id, name, email FROM caregiver_accounts WHERE email = ? AND email_verified = 1'
+          ).bind(email.toLowerCase()).first() as any
+
+          // Always return success to prevent email enumeration
+          if (!account) return Response.json({ success: true, message: 'If an account exists, a reset email has been sent.' })
+
+          const resetToken = crypto.randomUUID() + '-' + crypto.randomUUID()
+          const expiresAt = Math.floor(Date.now() / 1000) + 3600 // 1 hour
+
+          // Clean up old tokens for this email first
+          await cloudflare.env.D1.prepare(
+            'DELETE FROM password_reset_tokens WHERE email = ?'
+          ).bind(email.toLowerCase()).run()
+
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO password_reset_tokens (email, token, expires_at) VALUES (?, ?, ?)'
+          ).bind(email.toLowerCase(), resetToken, expiresAt).run()
+
+          const resetLink = `https://work.carehia.com?reset=${resetToken}`
+          await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${cloudflare.env.RESEND_API_KEY}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: 'Carehia <hello@carehia.com>',
+              to: [email.toLowerCase()],
+              subject: 'Reset your Carehia password',
+              html: `
+                <div style="font-family: sans-serif; max-width: 520px; margin: 0 auto; padding: 32px 24px; background: #0F0A1E; color: #fff; border-radius: 16px;">
+                  <div style="text-align: center; margin-bottom: 32px;">
+                    <div style="font-size: 28px; font-weight: 800; background: linear-gradient(135deg, #7C5CFF, #4A90E2); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">Carehia</div>
+                  </div>
+                  <h2 style="color: #fff; margin-bottom: 8px;">Reset your password</h2>
+                  <p style="color: #CBD5E1;">Hi ${account.name || 'Caregiver'}, we received a request to reset your Carehia password. Click the button below — this link expires in 1 hour.</p>
+                  <div style="text-align: center; margin: 32px 0;">
+                    <a href="${resetLink}" style="display: inline-block; background: linear-gradient(135deg, #7C5CFF, #4A90E2); color: #fff; text-decoration: none; padding: 14px 32px; border-radius: 50px; font-weight: 700; font-size: 16px;">Reset My Password</a>
+                  </div>
+                  <p style="color: #64748B; font-size: 13px;">If you didn't request this, you can safely ignore this email. Your password will not be changed.</p>
+                  <p style="color: #64748B; font-size: 12px; text-align: center; margin-top: 24px;">Carehia · <a href="https://carehia.com" style="color: #7C5CFF;">carehia.com</a></p>
+                </div>
+              `,
+            }),
+          })
+          return Response.json({ success: true, message: 'If an account exists, a reset email has been sent.' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
+    // ====== CAREGIVER RESET PASSWORD ======
+    {
+      path: '/caregiver-reset-password',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { token, new_password } = body
+          if (!token || !new_password) return Response.json({ error: 'token and new_password required' }, { status: 400 })
+          if (new_password.length < 8) return Response.json({ error: 'Password must be at least 8 characters' }, { status: 400 })
+
+          const now = Math.floor(Date.now() / 1000)
+          const resetRecord = await cloudflare.env.D1.prepare(
+            'SELECT * FROM password_reset_tokens WHERE token = ? AND expires_at > ? AND used = 0'
+          ).bind(token, now).first() as any
+
+          if (!resetRecord) return Response.json({ error: 'This reset link is invalid or has expired. Please request a new one.' }, { status: 400 })
+
+          // Hash the new password the same way as registration
+          const encoder = new TextEncoder()
+          const data = encoder.encode(new_password + resetRecord.email)
+          const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+          const hashArray = Array.from(new Uint8Array(hashBuffer))
+          const passwordHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE caregiver_accounts SET password_hash = ? WHERE email = ?'
+          ).bind(passwordHash, resetRecord.email).run()
+
+          await cloudflare.env.D1.prepare(
+            'UPDATE password_reset_tokens SET used = 1 WHERE token = ?'
+          ).bind(token).run()
+
+          return Response.json({ success: true, message: 'Password updated successfully. You can now sign in.' })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+
     // ====== CAREGIVER LOGIN ======
     {
       path: '/caregiver-login',
