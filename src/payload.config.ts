@@ -4855,7 +4855,17 @@ Return a JSON object with these fields:
           let certifications = []
           try { skills = JSON.parse((result as any).skills || '[]') } catch {}
           try { certifications = JSON.parse((result as any).certifications || '[]') } catch {}
-          return Response.json({ success: true, profile: { ...(result as any), skills, certifications } }, { headers })
+          // Fetch trust score for verified badges
+          const trustRow = await db.prepare('SELECT * FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(parseInt(id)).first() as any
+          const badges = {
+            idVerified: trustRow?.id_verified === 1 || trustRow?.id_verified === true,
+            backgroundReviewed: trustRow?.background_checked === 1 || trustRow?.background_checked === true,
+            licenseReviewed: trustRow?.cna_verified === 1 || trustRow?.cna_verified === true,
+            cprCertified: trustRow?.cpr_certified === 1 || trustRow?.cpr_certified === true,
+            trustScore: trustRow?.score || 0,
+            trustLevel: trustRow?.level || 'Basic',
+          }
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, badges } }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
