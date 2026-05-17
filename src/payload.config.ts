@@ -162,6 +162,43 @@ async function _ensureCaregiverActiveTimerTable(db: any): Promise<Set<string>> {
   return columns
 }
 
+async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caregiver_id INTEGER NOT NULL,
+    client_email TEXT,
+    client_name TEXT,
+    booking_id INTEGER,
+    rating INTEGER NOT NULL,
+    review_text TEXT,
+    is_repeat_client INTEGER DEFAULT 0,
+    is_punctual INTEGER DEFAULT 0,
+    is_caring INTEGER DEFAULT 0,
+    is_communicative INTEGER DEFAULT 0,
+    is_professional INTEGER DEFAULT 0,
+    would_hire_again INTEGER DEFAULT 0,
+    is_visible INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`)
+  const info = await db.prepare('PRAGMA table_info(caregiver_reviews)').all()
+  const columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('client_email', 'ALTER TABLE caregiver_reviews ADD COLUMN client_email TEXT')
+  await addColumn('client_name', 'ALTER TABLE caregiver_reviews ADD COLUMN client_name TEXT')
+  await addColumn('booking_id', 'ALTER TABLE caregiver_reviews ADD COLUMN booking_id INTEGER')
+  await addColumn('review_text', 'ALTER TABLE caregiver_reviews ADD COLUMN review_text TEXT')
+  await addColumn('is_repeat_client', 'ALTER TABLE caregiver_reviews ADD COLUMN is_repeat_client INTEGER DEFAULT 0')
+  await addColumn('is_punctual', 'ALTER TABLE caregiver_reviews ADD COLUMN is_punctual INTEGER DEFAULT 0')
+  await addColumn('is_caring', 'ALTER TABLE caregiver_reviews ADD COLUMN is_caring INTEGER DEFAULT 0')
+  await addColumn('is_communicative', 'ALTER TABLE caregiver_reviews ADD COLUMN is_communicative INTEGER DEFAULT 0')
+  await addColumn('is_professional', 'ALTER TABLE caregiver_reviews ADD COLUMN is_professional INTEGER DEFAULT 0')
+  await addColumn('would_hire_again', 'ALTER TABLE caregiver_reviews ADD COLUMN would_hire_again INTEGER DEFAULT 0')
+  await addColumn('is_visible', 'ALTER TABLE caregiver_reviews ADD COLUMN is_visible INTEGER DEFAULT 1')
+  await addColumn('created_at', 'ALTER TABLE caregiver_reviews ADD COLUMN created_at TEXT')
+}
+
 function _activeTimerFromRow(row: any): any | null {
   if (!row) return null
   let parsed: any = {}
@@ -3404,6 +3441,7 @@ Return a JSON object with these fields:
           ).bind(session.account_id).first()
           if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
 
+          await _ensureCaregiverReviewsTable(cloudflare.env.D1)
           const reviewStats = await cloudflare.env.D1.prepare(
             'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1'
           ).bind(session.account_id).first() as any
@@ -5414,6 +5452,10 @@ Return a JSON object with these fields:
             'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
           ).bind(parseInt(id)).first()
           if (!result) return Response.json({ success: false, error: 'Profile not found' }, { status: 404, headers })
+          await _ensureCaregiverReviewsTable(db)
+          const reviewStats = await db.prepare(
+            'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1'
+          ).bind(parseInt(id)).first() as any
           let skills = []
           let certifications = []
           try { skills = JSON.parse((result as any).skills || '[]') } catch {}
@@ -5428,7 +5470,7 @@ Return a JSON object with these fields:
             trustScore: trustRow?.score || 0,
             trustLevel: trustRow?.level || 'Basic',
           }
-          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, badges } }, { headers })
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, badges, rating: reviewStats?.avg_rating ? Math.round(reviewStats.avg_rating * 10) / 10 : null, total_reviews: reviewStats?.review_count || 0 } }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -5493,6 +5535,7 @@ Return a JSON object with these fields:
           const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
           const cgId = (session as any).caregiver_id
+          await _ensureCaregiverReviewsTable(db)
           const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
           const idVerif = await db.prepare('SELECT status, doc_type, submitted_at FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY id DESC LIMIT 1').bind(cgId).first()
           const bgCheck = await db.prepare('SELECT status, initiated_at, completed_at, expires_at FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
@@ -5536,6 +5579,7 @@ Return a JSON object with these fields:
           if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
           const cgId = parseInt(id)
+          await _ensureCaregiverReviewsTable(db)
           const idVerif = await db.prepare('SELECT status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN (?) ORDER BY id DESC LIMIT 1').bind(cgId, 'drivers_license,state_id,passport').first()
           const bgCheck = await db.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
           const certRows = await db.prepare("SELECT doc_type as name, status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha')").bind(cgId).all()
@@ -5662,10 +5706,64 @@ Return a JSON object with these fields:
           const id = url.searchParams.get('id')
           if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          const rows = await db.prepare('SELECT rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
+          await _ensureCaregiverReviewsTable(db)
+          const rows = await db.prepare('SELECT id, rating, review_text, client_name, is_repeat_client, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
           const reviews = rows.results || []
           const avg = reviews.length > 0 ? (reviews as any[]).reduce((s, r) => s + (r as any).rating, 0) / reviews.length : 0
           return Response.json({ success: true, reviews, avgRating: Math.round(avg*10)/10, reviewCount: reviews.length }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
+    // ====== RANDOM PUBLIC REVIEW CARDS (landing page carousel) ======
+    {
+      path: '/caregiver-review-cards',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const url = new URL(req.url)
+          const limit = Math.min(12, Math.max(3, parseInt(url.searchParams.get('limit') || '6')))
+          const db = (cloudflare as any).env.D1
+          await _ensureCaregiverReviewsTable(db)
+          const rows = await db.prepare(`
+            SELECT
+              r.id,
+              r.caregiver_id,
+              r.rating,
+              r.review_text,
+              r.created_at,
+              ca.name as caregiver_name,
+              ca.photo_url as caregiver_photo,
+              ca.city,
+              ca.state,
+              ca.skills
+            FROM caregiver_reviews r
+            JOIN caregiver_accounts ca ON ca.id = r.caregiver_id
+            WHERE r.is_visible = 1
+              AND r.rating >= 4
+              AND TRIM(COALESCE(r.review_text, '')) <> ''
+            ORDER BY RANDOM()
+            LIMIT ?
+          `).bind(limit).all()
+          const reviews = (rows.results || []).map((row: any) => {
+            let skills: string[] = []
+            try { skills = JSON.parse(row.skills || '[]') } catch {}
+            return {
+              id: row.id,
+              caregiverId: row.caregiver_id,
+              caregiverName: row.caregiver_name || 'Carehia caregiver',
+              caregiverPhoto: row.caregiver_photo || '',
+              location: [row.city, row.state].filter(Boolean).join(', '),
+              rating: row.rating,
+              reviewText: row.review_text,
+              skill: skills[0] || 'Caregiver',
+              createdAt: row.created_at,
+            }
+          })
+          return Response.json({ success: true, reviews }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -5681,19 +5779,31 @@ Return a JSON object with these fields:
         try {
           const body = await req.json()
           const { clientToken, caregiverId, bookingId, rating, reviewText, isPunctual, isCaring, isCommunicative, isProfessional, wouldHireAgain } = body
-          if (!caregiverId || !rating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
-          if (rating < 1 || rating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
+          const cgId = parseInt(String(caregiverId || ''), 10)
+          const safeRating = parseInt(String(rating || ''), 10)
+          if (!cgId || !safeRating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
+          if (safeRating < 1 || safeRating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          let clientEmail = body.clientEmail || 'anonymous'
+          await _ensureCaregiverReviewsTable(db)
+          const caregiver = await db.prepare('SELECT id FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
+          if (!caregiver) return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404, headers })
+          let clientEmail = String(body.clientEmail || '').trim().toLowerCase()
+          let clientName = String(body.clientName || '').trim()
           if (clientToken) {
-            const sess = await db.prepare('SELECT email FROM client_sessions WHERE session_token = ?').bind(clientToken).first()
-            if (sess) clientEmail = (sess as any).email
+            const sess = await db.prepare("SELECT cs.email, ca.name FROM client_sessions cs LEFT JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')").bind(clientToken).first()
+            if (sess) {
+              clientEmail = (sess as any).email || clientEmail
+              clientName = (sess as any).name || clientName
+            }
           }
-          const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
+          if (!clientEmail) clientEmail = 'anonymous'
+          const prior = clientEmail === 'anonymous'
+            ? null
+            : await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(cgId), clientEmail).first()
           const isRepeat = ((prior as any)?.cnt || 0) > 1 ? 1 : 0
-          await db.prepare('INSERT INTO caregiver_reviews (caregiver_id, client_email, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(parseInt(caregiverId), clientEmail, bookingId||null, rating, reviewText||'', isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
+          await db.prepare("INSERT INTO caregiver_reviews (caregiver_id, client_email, client_name, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))").bind(cgId, clientEmail, clientName || null, bookingId||null, safeRating, String(reviewText || '').trim().slice(0, 1000), isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
           if (isRepeat) {
-            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(parseInt(caregiverId)).run()
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(cgId).run()
           }
           return Response.json({ success: true, message: 'Review submitted. Thank you!' }, { headers })
         } catch (error) {
