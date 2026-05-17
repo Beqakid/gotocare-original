@@ -2506,7 +2506,9 @@ Return a JSON object with these fields:
         try {
           const url = new URL(req.url)
           const specialty = (url.searchParams.get('specialty') || '').toLowerCase().trim()
-          const limit = parseInt(url.searchParams.get('limit') || '50')
+          const knownCaregiverQuery = (url.searchParams.get('q') || url.searchParams.get('search') || '').toLowerCase().trim()
+          const requestedLimit = parseInt(url.searchParams.get('limit') || '50')
+          const limit = knownCaregiverQuery ? Math.max(requestedLimit, 200) : requestedLimit
           // Query D1 caregiver_accounts — this is where marketplace caregivers self-register
           const { results: rows } = await cloudflare.env.D1.prepare(
             `SELECT id, name, email, phone, bio, photo_url, zip_code, city, state,
@@ -2532,7 +2534,15 @@ Return a JSON object with these fields:
             try { if (JSON.parse(cg.care_types || '[]').length > 0) s += 10 } catch {}
             return s
           }
-          const filteredRows = (rows || []).filter((cg: any) => calcProfileCompleteness(cg) >= 70)
+          const matchesKnownCaregiver = (cg: any) => {
+            if (!knownCaregiverQuery) return true
+            const name = String(cg.name || '').toLowerCase()
+            const email = String(cg.email || '').toLowerCase()
+            return name.includes(knownCaregiverQuery) || email.includes(knownCaregiverQuery)
+          }
+          const filteredRows = (rows || []).filter((cg: any) => (
+            calcProfileCompleteness(cg) >= 70 && matchesKnownCaregiver(cg)
+          ))
           const mapped = filteredRows.map((cg: any) => {
             const nameParts = (cg.name || 'Caregiver').trim().split(' ')
             const firstName = nameParts[0] || 'Caregiver'
@@ -2549,12 +2559,21 @@ Return a JSON object with these fields:
             const rate = parseFloat(cg.hourly_rate) || 28
             // Match score based on specialty alignment
             let matchScore = 82 + Math.floor(Math.random() * 10)
+            const lowerName = String(cg.name || '').toLowerCase()
+            const lowerEmail = String(cg.email || '').toLowerCase()
+            if (knownCaregiverQuery) {
+              if (lowerEmail === knownCaregiverQuery || lowerName === knownCaregiverQuery) {
+                matchScore = 99
+              } else if (lowerEmail.includes(knownCaregiverQuery) || lowerName.includes(knownCaregiverQuery)) {
+                matchScore = 94
+              }
+            }
             if (specialty && skills.length > 0) {
               const exact = skills.some((s: string) => s.toLowerCase() === specialty)
               const partial = skills.some((s: string) => s.toLowerCase().includes(specialty.split(' ')[0]))
-              if (exact) matchScore = 93 + Math.floor(Math.random() * 5)
-              else if (partial) matchScore = 86 + Math.floor(Math.random() * 6)
-              else matchScore = 76 + Math.floor(Math.random() * 8)
+              if (exact) matchScore = Math.max(matchScore, 93 + Math.floor(Math.random() * 5))
+              else if (partial) matchScore = Math.max(matchScore, 86 + Math.floor(Math.random() * 6))
+              else if (!knownCaregiverQuery) matchScore = 76 + Math.floor(Math.random() * 8)
             }
             return {
               id: cg.id,
