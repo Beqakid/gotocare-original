@@ -2671,18 +2671,129 @@ Return a JSON object with these fields:
     },
     // ====== BOOK INTERVIEW ======
     {
+      path: '/interview-slots',
+      method: 'get',
+      handler: async (req) => {
+        try {
+          const url = new URL(req.url)
+          const caregiverId = url.searchParams.get('caregiverId')
+          const date = url.searchParams.get('date')
+          const duration = Math.min(60, Math.max(30, parseInt(url.searchParams.get('duration') || '30')))
+          if (!caregiverId || !date) {
+            return Response.json({ error: 'caregiverId and date required' }, { status: 400 })
+          }
+
+          const normalizeMinutes = (value: string) => {
+            const match = String(value || '').match(/^(\d{1,2}):(\d{2})/)
+            if (!match) return null
+            return parseInt(match[1]) * 60 + parseInt(match[2])
+          }
+          const formatTime = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`
+          const labelTime = (mins: number) => {
+            const hour24 = Math.floor(mins / 60)
+            const minute = mins % 60
+            const suffix = hour24 >= 12 ? 'PM' : 'AM'
+            const hour12 = hour24 % 12 || 12
+            return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`
+          }
+          const parseRange = (value: string) => {
+            const raw = String(value || '').toLowerCase().trim()
+            const bucketMap: Record<string, [number, number]> = {
+              morning: [9 * 60, 11 * 60],
+              afternoon: [12 * 60, 15 * 60],
+              evening: [16 * 60, 19 * 60],
+            }
+            if (bucketMap[raw]) return bucketMap[raw]
+            const parts = String(value || '').split('-')
+            if (parts.length !== 2) return null
+            const start = normalizeMinutes(parts[0])
+            const end = normalizeMinutes(parts[1])
+            return start !== null && end !== null && end > start ? [start, end] as [number, number] : null
+          }
+
+          const existing = await cloudflare.env.D1.prepare(
+            `SELECT preferred_time FROM caregiver_bookings
+             WHERE caregiver_id = ? AND preferred_date = ?
+             AND status IN ('pending', 'accepted', 'hired')`
+          ).bind(String(caregiverId), date).all()
+          const busy = (existing.results || [])
+            .map((row: any) => parseRange(row.preferred_time))
+            .filter(Boolean) as [number, number][]
+
+          const day = new Date(`${date}T12:00:00`).getDay()
+          const businessStart = day === 0 || day === 6 ? 10 * 60 : 9 * 60
+          const businessEnd = day === 0 || day === 6 ? 15 * 60 : 17 * 60
+          const slots = []
+          for (let start = businessStart; start + duration <= businessEnd; start += 30) {
+            const end = start + duration
+            const conflicts = busy.some(([busyStart, busyEnd]) => start < busyEnd && end > busyStart)
+            if (!conflicts) {
+              slots.push({
+                value: `${formatTime(start)}-${formatTime(end)}`,
+                label: `${labelTime(start)} - ${labelTime(end)}`,
+                startTime: formatTime(start),
+                endTime: formatTime(end),
+                durationMinutes: duration,
+              })
+            }
+          }
+          return Response.json({ success: true, slots })
+        } catch (error) {
+          return Response.json({ success: false, slots: [], error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    {
       path: '/book-interview',
       method: 'post',
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes } = body
+          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes, durationMinutes } = body
           if (!caregiverId || !clientEmail || !preferredDate) {
             return Response.json({ error: 'caregiverId, clientEmail, preferredDate required' }, { status: 400 })
           }
+          const normalizeMinutes = (value: string) => {
+            const match = String(value || '').match(/^(\d{1,2}):(\d{2})/)
+            if (!match) return null
+            return parseInt(match[1]) * 60 + parseInt(match[2])
+          }
+          const parseRange = (value: string) => {
+            const raw = String(value || '').toLowerCase().trim()
+            const bucketMap: Record<string, [number, number]> = {
+              morning: [9 * 60, 11 * 60],
+              afternoon: [12 * 60, 15 * 60],
+              evening: [16 * 60, 19 * 60],
+            }
+            if (bucketMap[raw]) return bucketMap[raw]
+            const parts = String(value || '').split('-')
+            if (parts.length !== 2) return null
+            const start = normalizeMinutes(parts[0])
+            const end = normalizeMinutes(parts[1])
+            return start !== null && end !== null && end > start ? [start, end] as [number, number] : null
+          }
+          const requestedRange = parseRange(preferredTime || '')
+          if (requestedRange) {
+            const existing = await cloudflare.env.D1.prepare(
+              `SELECT preferred_time FROM caregiver_bookings
+               WHERE caregiver_id = ? AND preferred_date = ?
+               AND status IN ('pending', 'accepted', 'hired')`
+            ).bind(String(caregiverId), preferredDate).all()
+            const hasConflict = (existing.results || []).some((row: any) => {
+              const range = parseRange(row.preferred_time)
+              return range ? requestedRange[0] < range[1] && requestedRange[1] > range[0] : false
+            })
+            if (hasConflict) {
+              return Response.json({ error: 'That interview time is no longer available.' }, { status: 409 })
+            }
+          }
+          const details = [
+            notes || '',
+            durationMinutes ? `Interview length: ${durationMinutes} minutes` : '',
+          ].filter(Boolean).join('\n')
           await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_bookings (caregiver_id, client_email, care_needs, preferred_date, preferred_time, interview_type, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', notes || '', 'pending').run()
+          ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', details, 'pending').run()
           // Send email nudge to caregiver (fire and forget)
           try {
             const cgRow = await cloudflare.env.D1.prepare(
