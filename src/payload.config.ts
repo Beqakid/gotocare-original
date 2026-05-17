@@ -163,23 +163,7 @@ async function _ensureCaregiverActiveTimerTable(db: any): Promise<Set<string>> {
 }
 
 async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
-  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_reviews (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    caregiver_id INTEGER NOT NULL,
-    client_email TEXT,
-    client_name TEXT,
-    booking_id INTEGER,
-    rating INTEGER NOT NULL,
-    review_text TEXT,
-    is_repeat_client INTEGER DEFAULT 0,
-    is_punctual INTEGER DEFAULT 0,
-    is_caring INTEGER DEFAULT 0,
-    is_communicative INTEGER DEFAULT 0,
-    is_professional INTEGER DEFAULT 0,
-    would_hire_again INTEGER DEFAULT 0,
-    is_visible INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )`)
+  await db.exec('CREATE TABLE IF NOT EXISTS caregiver_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL, client_email TEXT, client_name TEXT, booking_id INTEGER, rating INTEGER NOT NULL, review_text TEXT, is_repeat_client INTEGER DEFAULT 0, is_punctual INTEGER DEFAULT 0, is_caring INTEGER DEFAULT 0, is_communicative INTEGER DEFAULT 0, is_professional INTEGER DEFAULT 0, would_hire_again INTEGER DEFAULT 0, is_visible INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
   const info = await db.prepare('PRAGMA table_info(caregiver_reviews)').all()
   const columns = new Set((info.results || []).map((row: any) => row.name))
   const addColumn = async (name: string, sql: string) => {
