@@ -135,6 +135,57 @@ async function _ensurePersonalInvoiceSendColumns(db: any): Promise<void> {
   await addColumn('last_sent_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN last_sent_at TEXT')
   await addColumn('send_count', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN send_count INTEGER DEFAULT 0')
   await addColumn('email_id', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN email_id TEXT')
+  await addColumn('paid_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN paid_at TEXT')
+}
+
+async function _ensureCaregiverActiveTimerTable(db: any): Promise<Set<string>> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_active_timer (
+    caregiver_email TEXT PRIMARY KEY,
+    timer_json TEXT,
+    start_time TEXT,
+    client_name TEXT,
+    is_running INTEGER DEFAULT 1,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`)
+  let info = await db.prepare('PRAGMA table_info(caregiver_active_timer)').all()
+  let columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('timer_json', 'ALTER TABLE caregiver_active_timer ADD COLUMN timer_json TEXT')
+  await addColumn('start_time', 'ALTER TABLE caregiver_active_timer ADD COLUMN start_time TEXT')
+  await addColumn('client_name', 'ALTER TABLE caregiver_active_timer ADD COLUMN client_name TEXT')
+  await addColumn('is_running', 'ALTER TABLE caregiver_active_timer ADD COLUMN is_running INTEGER DEFAULT 1')
+  await addColumn('updated_at', 'ALTER TABLE caregiver_active_timer ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP')
+  info = await db.prepare('PRAGMA table_info(caregiver_active_timer)').all()
+  columns = new Set((info.results || []).map((row: any) => row.name))
+  return columns
+}
+
+function _activeTimerFromRow(row: any): any | null {
+  if (!row) return null
+  let parsed: any = {}
+  try {
+    parsed = row.timer_json ? JSON.parse(row.timer_json) || {} : {}
+  } catch {
+    parsed = {}
+  }
+  const startTime = parsed.startTime || parsed.start_time || row.start_time || ''
+  if (!startTime) return null
+  return {
+    ...parsed,
+    startTime,
+    clientName: parsed.clientName || parsed.client_name || row.client_name || '',
+    hourlyRate: Number(parsed.hourlyRate || parsed.hourly_rate || row.hourly_rate || 0),
+    billingType: parsed.billingType || parsed.billing_type || 'hourly',
+    notes: parsed.notes || '',
+    updatedAt: row.updated_at || parsed.updatedAt || '',
+  }
+}
+
+function _activeTimerStartMs(timer: any): number {
+  const ms = new Date(timer?.startTime || timer?.start_time || 0).getTime()
+  return Number.isFinite(ms) ? ms : 0
 }
 
 function _parseInvoiceItems(value: any): any[] {
@@ -166,6 +217,7 @@ function _normalizePersonalInvoice(input: any): any {
     issuedDate: issueDate,
     dueDate: input.dueDate || input.due_date || '',
     notes: input.notes || '',
+    paidAt: input.paidAt || input.paid_at || '',
     sentAt: input.sentAt || input.sent_at || '',
     lastSentAt: input.lastSentAt || input.last_sent_at || '',
     sendCount: Number(input.sendCount ?? input.send_count ?? 0),
@@ -191,6 +243,7 @@ function _personalInvoiceResponse(row: any): any {
     issuedDate: invoice.issueDate,
     dueDate: invoice.dueDate,
     notes: invoice.notes,
+    paidAt: invoice.paidAt,
     sentAt: invoice.sentAt,
     lastSentAt: invoice.lastSentAt,
     sendCount: invoice.sendCount,
@@ -4064,10 +4117,12 @@ Return a JSON object with these fields:
           ).bind(clientEmail).all()
           const caregivers = (bookings.results || []) as any[]
           const liveStatuses = []
+          await _ensureCaregiverActiveTimerTable(env.D1)
           for (const cg of caregivers) {
-            const timer = await env.D1.prepare(
-              'SELECT start_time, client_name, is_running FROM caregiver_active_timer WHERE caregiver_email = ? AND is_running = 1'
+            const row = await env.D1.prepare(
+              'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
             ).bind(cg.caregiver_email).first() as any
+            const timer = _activeTimerFromRow(row)
             liveStatuses.push({
               bookingId: cg.id,
               caregiverId: cg.caregiver_id,
@@ -4075,8 +4130,8 @@ Return a JSON object with these fields:
               caregiverName: cg.caregiver_name,
               careNeeds: cg.care_needs,
               isOnsite: !!timer,
-              startTime: timer ? timer.start_time : null,
-              clientName: timer ? timer.client_name : null,
+              startTime: timer ? timer.startTime : null,
+              clientName: timer ? timer.clientName : null,
             })
           }
           return Response.json({ success: true, statuses: liveStatuses }, { headers })
@@ -4591,11 +4646,12 @@ Return a JSON object with these fields:
             "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!timerSession) return Response.json({ timer: null }, { headers })
+          await _ensureCaregiverActiveTimerTable(cloudflare.env.D1)
           const row = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
           ).bind(timerSession.email).first() as any
           if (!row) return Response.json({ timer: null }, { headers })
-          return Response.json({ timer: JSON.parse(row.timer_json || 'null') }, { headers })
+          return Response.json({ timer: _activeTimerFromRow(row) }, { headers })
         } catch (error) {
           return Response.json({ timer: null }, { headers })
         }
@@ -4610,16 +4666,39 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, timer } = body
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const timerSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!timerSession) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          const timerColumns = await _ensureCaregiverActiveTimerTable(cloudflare.env.D1)
           if (timer === null) {
             await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerSession.email).run()
           } else {
+            const normalizedTimer = {
+              ...timer,
+              startTime: timer.startTime || timer.start_time || new Date().toISOString(),
+              clientName: timer.clientName || timer.client_name || '',
+            }
+            const fields = ['caregiver_email', 'timer_json', 'updated_at']
+            const placeholders = ['?', '?', 'CURRENT_TIMESTAMP']
+            const values: any[] = [timerSession.email, JSON.stringify(normalizedTimer)]
+            if (timerColumns.has('start_time')) {
+              fields.push('start_time')
+              placeholders.push('?')
+              values.push(normalizedTimer.startTime)
+            }
+            if (timerColumns.has('client_name')) {
+              fields.push('client_name')
+              placeholders.push('?')
+              values.push(normalizedTimer.clientName)
+            }
+            if (timerColumns.has('is_running')) {
+              fields.push('is_running')
+              placeholders.push('1')
+            }
             await cloudflare.env.D1.prepare(
-              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
-            ).bind(timerSession.email, JSON.stringify(timer)).run()
+              `INSERT OR REPLACE INTO caregiver_active_timer (${fields.join(', ')}) VALUES (${placeholders.join(', ')})`
+            ).bind(...values).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
@@ -4681,6 +4760,7 @@ Return a JSON object with these fields:
             if (updates.issueDate !== undefined || updates.issuedDate !== undefined) { fields.push('issued_date = ?'); vals.push(normalized.issueDate) }
             if (updates.dueDate !== undefined) { fields.push('due_date = ?'); vals.push(normalized.dueDate) }
             if (updates.notes !== undefined) { fields.push('notes = ?'); vals.push(normalized.notes) }
+            if (updates.paidAt !== undefined || updates.paid_at !== undefined) { fields.push('paid_at = ?'); vals.push(normalized.paidAt) }
             if (fields.length === 0) return Response.json({ success: true }, { headers })
             vals.push(Number(cloudId), session.account_id)
             await cloudflare.env.D1.prepare(
@@ -6010,25 +6090,31 @@ Return a JSON object with these fields:
           // Find any caregiver on team who has an active timer running
           // caregiver_active_timer uses caregiver_email — join via caregiver_accounts
           const ph = caregiverIds.map(() => '?').join(',')
-          const timerRow = await db.prepare(
-            `SELECT cat.start_time, cat.client_name, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
+          await _ensureCaregiverActiveTimerTable(db)
+          const timerRows = await db.prepare(
+            `SELECT cat.*, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
              FROM caregiver_active_timer cat
              JOIN caregiver_accounts ca ON ca.email = cat.caregiver_email
              WHERE ca.id IN (${ph})
-             ORDER BY cat.start_time DESC LIMIT 1`
-          ).bind(...caregiverIds).first() as any
+             ORDER BY cat.updated_at DESC`
+          ).bind(...caregiverIds).all() as any
+          const activeRows = ((timerRows.results || []) as any[])
+            .map((row: any) => ({ row, timer: _activeTimerFromRow(row) }))
+            .filter((item: any) => !!item.timer)
+            .sort((a: any, b: any) => _activeTimerStartMs(b.timer) - _activeTimerStartMs(a.timer))
+          const active = activeRows[0]
 
-          if (!timerRow) {
+          if (!active) {
             return Response.json({ active: false, message: 'No caregiver currently onsite' }, { headers })
           }
 
           return Response.json({
             active: true,
-            caregiver_name: timerRow.caregiver_name || 'Caregiver',
-            caregiver_id: timerRow.caregiver_id,
-            photo_url: timerRow.photo_url || null,
-            start_time: timerRow.start_time,
-            client_name: timerRow.client_name || '',
+            caregiver_name: active.row.caregiver_name || 'Caregiver',
+            caregiver_id: active.row.caregiver_id,
+            photo_url: active.row.photo_url || null,
+            start_time: active.timer.startTime,
+            client_name: active.timer.clientName || '',
           }, { headers })
         } catch (error) {
           return Response.json({ active: false, error: String(error) }, { status: 500, headers })
