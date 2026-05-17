@@ -124,6 +124,219 @@ async function _sendPushBatch(db: any, cgIds: number[], vapidPub: string, vapidP
   return sent;
 }
 
+async function _ensurePersonalInvoiceSendColumns(db: any): Promise<void> {
+  const info = await db.prepare('PRAGMA table_info(caregiver_personal_invoices)').all()
+  const columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('client_email', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN client_email TEXT')
+  await addColumn('sent_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN sent_at TEXT')
+  await addColumn('last_sent_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN last_sent_at TEXT')
+  await addColumn('send_count', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN send_count INTEGER DEFAULT 0')
+  await addColumn('email_id', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN email_id TEXT')
+}
+
+function _parseInvoiceItems(value: any): any[] {
+  if (Array.isArray(value)) return value
+  if (!value) return []
+  try {
+    const parsed = JSON.parse(value)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function _normalizePersonalInvoice(input: any): any {
+  const items = _parseInvoiceItems(input.items || input.lineItems || input.line_items)
+  const total = Number(input.total ?? input.amount ?? input.subtotal ?? 0)
+  const issueDate = input.issueDate || input.issuedDate || input.issued_date || new Date().toISOString().split('T')[0]
+  return {
+    id: input.id ? String(input.id).replace(/^cloud_/, '') : '',
+    invoiceNumber: input.invoiceNumber || input.invoice_number || '',
+    clientName: input.clientName || input.client_name || '',
+    clientEmail: input.clientEmail || input.client_email || '',
+    items,
+    subtotal: Number(input.subtotal ?? total),
+    total,
+    amount: total,
+    status: input.status || 'draft',
+    issueDate,
+    issuedDate: issueDate,
+    dueDate: input.dueDate || input.due_date || '',
+    notes: input.notes || '',
+    sentAt: input.sentAt || input.sent_at || '',
+    lastSentAt: input.lastSentAt || input.last_sent_at || '',
+    sendCount: Number(input.sendCount ?? input.send_count ?? 0),
+    emailId: input.emailId || input.email_id || '',
+  }
+}
+
+function _personalInvoiceResponse(row: any): any {
+  const invoice = _normalizePersonalInvoice(row)
+  return {
+    id: 'cloud_' + row.id,
+    cloudId: String(row.id),
+    invoiceNumber: invoice.invoiceNumber,
+    clientName: invoice.clientName,
+    clientEmail: invoice.clientEmail,
+    items: invoice.items,
+    lineItems: invoice.items,
+    subtotal: invoice.subtotal,
+    total: invoice.total,
+    amount: invoice.total,
+    status: invoice.status,
+    issueDate: invoice.issueDate,
+    issuedDate: invoice.issueDate,
+    dueDate: invoice.dueDate,
+    notes: invoice.notes,
+    sentAt: invoice.sentAt,
+    lastSentAt: invoice.lastSentAt,
+    sendCount: invoice.sendCount,
+    emailId: invoice.emailId,
+    createdAt: row.created_at || '',
+  }
+}
+
+function _htmlEscape(value: any): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function _money(value: any): string {
+  return `$${Number(value || 0).toFixed(2)}`
+}
+
+function _invoiceEmailHtml(invoice: any, caregiver: any): string {
+  const rows = invoice.items.length ? invoice.items.map((item: any) => `
+    <tr>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">${_htmlEscape(item.description || 'Care services')}</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${Number(item.hours || 0).toFixed(2)}</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${_money(item.rate)}</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#0f172a;font-weight:700;">${_money(item.amount)}</td>
+    </tr>
+  `).join('') : `
+    <tr>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">Care services</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">1.00</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${_money(invoice.total)}</td>
+      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#0f172a;font-weight:700;">${_money(invoice.total)}</td>
+    </tr>
+  `
+
+  return `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 16px;">
+    <tr><td align="center">
+      <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #e2e8f0;">
+        <tr>
+          <td style="background:#0f172a;padding:28px 32px;color:#ffffff;">
+            <h1 style="margin:0;font-size:24px;letter-spacing:0;">Carehia</h1>
+            <p style="margin:8px 0 0;color:#cbd5e1;font-size:14px;">Invoice ${_htmlEscape(invoice.invoiceNumber)}</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:32px;">
+            <p style="margin:0 0 18px;color:#0f172a;font-size:18px;font-weight:700;">Hi ${_htmlEscape(invoice.clientName || 'there')},</p>
+            <p style="margin:0 0 24px;color:#475569;font-size:15px;line-height:1.6;">Your caregiver has sent an invoice for care services. A PDF copy is attached for your records.</p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;background:#f8fafc;border-radius:12px;">
+              <tr>
+                <td style="padding:16px;color:#64748b;font-size:13px;">Issued<br><strong style="color:#0f172a;font-size:15px;">${_htmlEscape(invoice.issueDate)}</strong></td>
+                <td style="padding:16px;color:#64748b;font-size:13px;">Due<br><strong style="color:#0f172a;font-size:15px;">${_htmlEscape(invoice.dueDate)}</strong></td>
+                <td style="padding:16px;color:#64748b;font-size:13px;">Total<br><strong style="color:#0f172a;font-size:20px;">${_money(invoice.total)}</strong></td>
+              </tr>
+            </table>
+            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:24px;">
+              <thead>
+                <tr>
+                  <th align="left" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Description</th>
+                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Hours</th>
+                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Rate</th>
+                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Amount</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+            ${invoice.notes ? `<p style="margin:0 0 24px;color:#475569;font-size:14px;"><strong style="color:#0f172a;">Notes:</strong> ${_htmlEscape(invoice.notes)}</p>` : ''}
+            <p style="margin:0;color:#64748b;font-size:13px;line-height:1.5;">Questions? Reply to this email or contact <a href="mailto:support@carehia.com" style="color:#2563eb;">support@carehia.com</a>.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;padding:18px 32px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;">
+            Sent by ${_htmlEscape(caregiver?.name || caregiver?.email || 'your caregiver')} through Carehia.
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`
+}
+
+function _pdfEscape(value: any): string {
+  return String(value ?? '')
+    .replace(/[^\x20-\x7E]/g, '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+}
+
+function _invoicePdfBase64(invoice: any, caregiver: any): string {
+  const lines = [
+    'Carehia Invoice',
+    `Invoice: ${invoice.invoiceNumber}`,
+    `Client: ${invoice.clientName}`,
+    invoice.clientEmail ? `Client email: ${invoice.clientEmail}` : '',
+    `Issued: ${invoice.issueDate}`,
+    `Due: ${invoice.dueDate}`,
+    '',
+    'Items:',
+    ...invoice.items.map((item: any) => `${item.description || 'Care services'} - ${Number(item.hours || 0).toFixed(2)} hrs x ${_money(item.rate)} = ${_money(item.amount)}`),
+    '',
+    `Total due: ${_money(invoice.total)}`,
+    invoice.notes ? `Notes: ${invoice.notes}` : '',
+    '',
+    `Sent by ${caregiver?.name || caregiver?.email || 'Carehia caregiver'}`,
+  ].filter(Boolean).map((line) => _pdfEscape(line).slice(0, 100))
+
+  const stream = [
+    'BT',
+    '/F1 18 Tf',
+    '50 760 Td',
+    `(${lines[0] || 'Carehia Invoice'}) Tj`,
+    '/F1 10 Tf',
+    ...lines.slice(1).flatMap((line) => ['0 -18 Td', `(${line}) Tj`]),
+    'ET',
+  ].join('\n')
+
+  const objects = [
+    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
+    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
+    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n',
+    `4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`,
+    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
+  ]
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  objects.forEach((obj) => {
+    offsets.push(pdf.length)
+    pdf += obj
+  })
+  const xref = pdf.length
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
+  pdf += offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
+  return btoa(pdf)
+}
+
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -4429,21 +4642,11 @@ Return a JSON object with these fields:
             "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
           const result = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_personal_invoices WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 100'
           ).bind(session.account_id).all()
-          const invoices = (result.results || []).map((inv: any) => ({
-            id: 'cloud_' + inv.id,
-            cloudId: String(inv.id),
-            invoiceNumber: inv.invoice_number,
-            clientName: inv.client_name,
-            amount: inv.amount,
-            status: inv.status,
-            issuedDate: inv.issued_date,
-            dueDate: inv.due_date,
-            lineItems: inv.line_items ? (() => { try { return JSON.parse(inv.line_items) } catch { return [] } })() : [],
-            notes: inv.notes || '',
-          }))
+          const invoices = (result.results || []).map(_personalInvoiceResponse)
           return Response.json({ success: true, invoices }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -4463,12 +4666,21 @@ Return a JSON object with these fields:
             "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
 
           // UPDATE STATUS (replaces PATCH)
           if (cloudId && updates) {
+            const normalized = _normalizePersonalInvoice(updates)
             const fields: string[] = []
             const vals: any[] = []
             if (updates.status !== undefined) { fields.push('status = ?'); vals.push(updates.status) }
+            if (updates.clientName !== undefined) { fields.push('client_name = ?'); vals.push(normalized.clientName) }
+            if (updates.clientEmail !== undefined) { fields.push('client_email = ?'); vals.push(normalized.clientEmail) }
+            if (updates.items !== undefined || updates.lineItems !== undefined) { fields.push('line_items = ?'); vals.push(JSON.stringify(normalized.items)) }
+            if (updates.total !== undefined || updates.amount !== undefined || updates.subtotal !== undefined) { fields.push('amount = ?'); vals.push(normalized.total) }
+            if (updates.issueDate !== undefined || updates.issuedDate !== undefined) { fields.push('issued_date = ?'); vals.push(normalized.issueDate) }
+            if (updates.dueDate !== undefined) { fields.push('due_date = ?'); vals.push(normalized.dueDate) }
+            if (updates.notes !== undefined) { fields.push('notes = ?'); vals.push(normalized.notes) }
             if (fields.length === 0) return Response.json({ success: true }, { headers })
             vals.push(Number(cloudId), session.account_id)
             await cloudflare.env.D1.prepare(
@@ -4479,16 +4691,17 @@ Return a JSON object with these fields:
 
           // CREATE NEW INVOICE
           if (!invoice) return Response.json({ success: false, error: 'invoice required' }, { status: 400, headers })
+          const normalized = _normalizePersonalInvoice(invoice)
           const r = await cloudflare.env.D1.prepare(
             `INSERT INTO caregiver_personal_invoices
-             (caregiver_id, invoice_number, client_name, amount, status, issued_date, due_date, line_items, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             (caregiver_id, invoice_number, client_name, client_email, amount, status, issued_date, due_date, line_items, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
             session.account_id,
-            invoice.invoiceNumber || '', invoice.clientName || '',
-            invoice.amount || 0, invoice.status || 'draft',
-            invoice.issuedDate || '', invoice.dueDate || '',
-            JSON.stringify(invoice.lineItems || []), invoice.notes || ''
+            normalized.invoiceNumber, normalized.clientName, normalized.clientEmail,
+            normalized.total, normalized.status,
+            normalized.issueDate, normalized.dueDate,
+            JSON.stringify(normalized.items), normalized.notes
           ).run() as any
           return Response.json({ success: true, cloudId: String(r.meta?.last_row_id || r.lastRowId || '') }, { headers })
         } catch (error) {
@@ -4514,6 +4727,99 @@ Return a JSON object with these fields:
             'DELETE FROM caregiver_personal_invoices WHERE id = ? AND caregiver_id = ?'
           ).bind(Number(cloudId), session.account_id).run()
           return Response.json({ success: true }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+    {
+      path: '/caregiver-invoice-send',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const token = body.token || ''
+          const cloudId = String(body.cloudId || body.invoiceId || '').replace(/^cloud_/, '')
+          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
+
+          const session = await cloudflare.env.D1.prepare(
+            "SELECT cs.account_id, ca.email, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+
+          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
+
+          let row: any = null
+          if (cloudId && Number.isFinite(Number(cloudId))) {
+            row = await cloudflare.env.D1.prepare(
+              'SELECT * FROM caregiver_personal_invoices WHERE id = ? AND caregiver_id = ?'
+            ).bind(Number(cloudId), session.account_id).first() as any
+          }
+
+          const invoice = _normalizePersonalInvoice(row || body.invoice || {})
+          if (!invoice.invoiceNumber) invoice.invoiceNumber = `INV-${Date.now().toString(36).toUpperCase()}`
+          if (!invoice.clientName) return Response.json({ success: false, error: 'clientName required' }, { status: 400, headers })
+          if (!invoice.clientEmail) return Response.json({ success: false, error: 'clientEmail required' }, { status: 400, headers })
+          if (!invoice.total || invoice.total <= 0) return Response.json({ success: false, error: 'Invoice total must be greater than zero' }, { status: 400, headers })
+
+          const resendKey = cloudflare.env.RESEND_API_KEY
+          if (!resendKey) return Response.json({ success: false, error: 'RESEND_API_KEY not configured' }, { status: 500, headers })
+
+          const emailRes = await fetch('https://api.resend.com/emails', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${resendKey}`,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              from: 'Carehia <support@carehia.com>',
+              to: [invoice.clientEmail],
+              reply_to: 'support@carehia.com',
+              subject: `Invoice ${invoice.invoiceNumber} from Carehia`,
+              html: _invoiceEmailHtml(invoice, session),
+              attachments: [
+                {
+                  filename: `${invoice.invoiceNumber || 'invoice'}.pdf`,
+                  content: _invoicePdfBase64(invoice, session),
+                },
+              ],
+            }),
+          })
+
+          const emailData = await emailRes.json() as any
+          if (!emailRes.ok) {
+            return Response.json({ success: false, error: emailData.message || 'Email send failed' }, { status: 500, headers })
+          }
+
+          const sentAt = new Date().toISOString()
+          let updatedInvoice = {
+            ...invoice,
+            status: 'sent',
+            sentAt: invoice.sentAt || sentAt,
+            lastSentAt: sentAt,
+            sendCount: (invoice.sendCount || 0) + 1,
+            emailId: emailData.id || '',
+          }
+
+          if (row?.id) {
+            await cloudflare.env.D1.prepare(
+              `UPDATE caregiver_personal_invoices
+               SET status = 'sent',
+                   client_email = ?,
+                   sent_at = COALESCE(sent_at, ?),
+                   last_sent_at = ?,
+                   send_count = COALESCE(send_count, 0) + 1,
+                   email_id = ?
+               WHERE id = ? AND caregiver_id = ?`
+            ).bind(invoice.clientEmail, sentAt, sentAt, emailData.id || '', row.id, session.account_id).run()
+            const saved = await cloudflare.env.D1.prepare(
+              'SELECT * FROM caregiver_personal_invoices WHERE id = ? AND caregiver_id = ?'
+            ).bind(row.id, session.account_id).first() as any
+            updatedInvoice = _personalInvoiceResponse(saved)
+          }
+
+          return Response.json({ success: true, emailId: emailData.id, invoice: updatedInvoice }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
