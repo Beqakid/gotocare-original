@@ -197,6 +197,7 @@ function _activeTimerFromRow(row: any): any | null {
     ...parsed,
     startTime,
     clientName: parsed.clientName || parsed.client_name || row.client_name || '',
+    clientEmail: parsed.clientEmail || parsed.client_email || row.client_email || '',
     hourlyRate: Number(parsed.hourlyRate || parsed.hourly_rate || row.hourly_rate || 0),
     billingType: parsed.billingType || parsed.billing_type || 'hourly',
     notes: parsed.notes || '',
@@ -4539,8 +4540,16 @@ Return a JSON object with these fields:
             "UPDATE hire_agreements SET client_signature = ?, client_signed_at = ?, status = 'active' WHERE agreement_token = ?"
           ).bind(clientSignature, now, agreementToken).run()
           await env.D1.prepare(
-            "UPDATE client_team SET status = 'active' WHERE client_email = ? AND caregiver_id = ?"
-          ).bind(sess.email, agreement.caregiver_id).run()
+            "UPDATE client_team SET status = 'active', agreement_token = COALESCE(agreement_token, ?), hired_at = COALESCE(hired_at, datetime('now')) WHERE client_email = ? AND caregiver_id = ?"
+          ).bind(agreementToken, sess.email, agreement.caregiver_id).run()
+          const activeTeamRow = await env.D1.prepare(
+            'SELECT caregiver_id FROM client_team WHERE client_email = ? AND caregiver_id = ? AND status = ?'
+          ).bind(sess.email, agreement.caregiver_id, 'active').first()
+          if (!activeTeamRow) {
+            await env.D1.prepare(
+              "INSERT INTO client_team (client_email, caregiver_id, booking_id, status, agreement_token, hired_at) VALUES (?, ?, ?, 'active', ?, datetime('now'))"
+            ).bind(sess.email, agreement.caregiver_id, agreement.booking_id || null, agreementToken).run()
+          }
           const cg2 = await env.D1.prepare('SELECT name, email FROM caregiver_accounts WHERE id = ?').bind(agreement.caregiver_id).first() as any
           const careTypesStr = (() => { try { return JSON.parse(agreement.care_types || '[]').join(', ') } catch(e) { return agreement.care_types || '' } })()
           const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="margin-top:16px"><a href="https://gotocare-original.jjioji.workers.dev/api/hire-agreement?token=${agreementToken}&format=html" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">🖨️ Download / Print Signed Agreement</a></p><p style="margin-top:24px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
@@ -4567,9 +4576,12 @@ Return a JSON object with these fields:
             }
             if (cgEmail2 && agreement.client_email) {
               const existingPc = await env.D1.prepare('SELECT id FROM caregiver_private_clients WHERE caregiver_email = ? AND email = ?').bind(cgEmail2, agreement.client_email).first()
+              const caregiverClientName = agreement.client_name || sess.name || agreement.client_email.split('@')[0]
+              const cgRate2 = parseFloat(String(agreement.caregiver_rate)) || 25
               if (!existingPc) {
-                const cgRate2 = parseFloat(String(agreement.caregiver_rate)) || 25
-                await env.D1.prepare("INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type) VALUES (?, ?, ?, ?, ?, ?, 'hourly')").bind(cgEmail2, agreement.client_name || agreement.client_email.split('@')[0], agreement.client_email, '', cgRate2, careTypeFirst).run()
+                await env.D1.prepare("INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, 'hourly', 8, 1.5)").bind(cgEmail2, caregiverClientName, agreement.client_email, '', cgRate2, careTypeFirst).run()
+              } else {
+                await env.D1.prepare("UPDATE caregiver_private_clients SET name = COALESCE(NULLIF(name, ''), ?), hourly_rate = ?, care_type = COALESCE(NULLIF(care_type, ''), ?), billing_type = COALESCE(NULLIF(billing_type, ''), 'hourly') WHERE caregiver_email = ? AND email = ?").bind(caregiverClientName, cgRate2, careTypeFirst, cgEmail2, agreement.client_email).run()
               }
             }
           } catch (_autoErr: any) { /* non-blocking — don't fail the agreement */ }
@@ -6325,6 +6337,10 @@ Return a JSON object with these fields:
           const activeRows = ((timerRows.results || []) as any[])
             .map((row: any) => ({ row, timer: _activeTimerFromRow(row) }))
             .filter((item: any) => !!item.timer)
+            .filter((item: any) => {
+              const timerClientEmail = String(item.timer.clientEmail || '').toLowerCase()
+              return !timerClientEmail || timerClientEmail === clientEmail.toLowerCase()
+            })
             .sort((a: any, b: any) => _activeTimerStartMs(b.timer) - _activeTimerStartMs(a.timer))
           const active = activeRows[0]
 
