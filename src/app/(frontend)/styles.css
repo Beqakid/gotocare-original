@@ -162,3 +162,210 @@ svg {
     }
   }
 }
+
+.carehia-kai-demo {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top left, rgba(20, 184, 166, 0.18), transparent 32rem),
+    linear-gradient(135deg, #f8fafc 0%, #eef7f5 48%, #f7f2e8 100%);
+  color: #17322f;
+  font-family:
+    Inter,
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+}
+
+.carehia-kai-demo h1,
+.carehia-kai-demo h2,
+.carehia-kai-demo p {
+  margin: 0;
+}
+
+.carehia-demo-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: min(1120px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 1.2rem 0;
+}
+
+.carehia-demo-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.7rem;
+  color: #17322f;
+  text-decoration: none;
+}
+
+.carehia-demo-brand span,
+.carehia-demo-panel-head span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.6rem;
+  background: #0f766e;
+  color: white;
+  font-weight: 800;
+}
+
+.carehia-demo-pill {
+  border: 1px solid rgba(15, 118, 110, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.65);
+  padding: 0.35rem 0.75rem;
+  color: #0f766e;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.carehia-demo-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.75fr);
+  gap: 2rem;
+  align-items: center;
+  width: min(1120px, calc(100% - 2rem));
+  min-height: calc(100vh - 9rem);
+  margin: 0 auto;
+  padding: 3rem 0 2rem;
+}
+
+.carehia-demo-eyebrow {
+  color: #0f766e;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.carehia-demo-copy h1 {
+  max-width: 760px;
+  margin-top: 1rem;
+  color: #10211f;
+  font-size: clamp(2.4rem, 7vw, 5.6rem);
+  line-height: 0.98;
+}
+
+.carehia-demo-lede {
+  max-width: 680px;
+  margin-top: 1.3rem;
+  color: #48615d;
+  font-size: 1.05rem;
+  line-height: 1.65;
+}
+
+.carehia-demo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 1.7rem;
+}
+
+.carehia-demo-actions a {
+  border-radius: 0.55rem;
+  padding: 0.75rem 1rem;
+  text-decoration: none;
+  font-size: 0.95rem;
+  font-weight: 750;
+}
+
+.carehia-demo-actions a:first-child {
+  background: #0f766e;
+  color: white;
+}
+
+.carehia-demo-actions a:last-child {
+  border: 1px solid rgba(15, 118, 110, 0.24);
+  background: rgba(255, 255, 255, 0.64);
+  color: #0f766e;
+}
+
+.carehia-demo-panel,
+.carehia-demo-grid article {
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 0.7rem;
+  background: rgba(255, 255, 255, 0.78);
+  box-shadow: 0 24px 70px rgba(15, 23, 42, 0.08);
+}
+
+.carehia-demo-panel {
+  padding: 1.4rem;
+}
+
+.carehia-demo-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid rgba(15, 118, 110, 0.12);
+}
+
+.carehia-demo-panel-head p {
+  color: #61736f;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.carehia-demo-panel ol {
+  display: grid;
+  gap: 0.85rem;
+  margin: 1rem 0 0;
+  padding-left: 1.2rem;
+  color: #415752;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.carehia-demo-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1rem;
+  width: min(1120px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 0 0 3rem;
+}
+
+.carehia-demo-grid article {
+  padding: 1.1rem;
+}
+
+.carehia-demo-grid h2 {
+  color: #10211f;
+  font-size: 1.05rem;
+  line-height: 1.35;
+}
+
+.carehia-demo-grid p {
+  margin-top: 0.65rem;
+  color: #58706b;
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.carehia-demo-footer {
+  width: min(1120px, calc(100% - 2rem));
+  margin: 0 auto;
+  padding: 1.25rem 0 2rem;
+  border-top: 1px solid rgba(15, 118, 110, 0.14);
+  color: #61736f;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 820px) {
+  .carehia-demo-hero,
+  .carehia-demo-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .carehia-demo-hero {
+    min-height: auto;
+    padding-top: 2rem;
+  }
+}
