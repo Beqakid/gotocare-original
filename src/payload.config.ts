@@ -184,23 +184,11 @@ async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
 }
 
 async function _ensureClientSubscriptionsTable(db: any): Promise<void> {
-  await db.exec(`CREATE TABLE IF NOT EXISTS client_subscriptions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL,
-    plan TEXT NOT NULL,
-    stripe_customer_id TEXT,
-    stripe_subscription_id TEXT,
-    stripe_session_id TEXT,
-    status TEXT DEFAULT 'active',
-    current_period_end TEXT,
-    contact_unlocks_used INTEGER DEFAULT 0,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )`)
+  await db.prepare("CREATE TABLE IF NOT EXISTS client_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, plan TEXT NOT NULL, stripe_customer_id TEXT, stripe_subscription_id TEXT, stripe_session_id TEXT, status TEXT DEFAULT 'active', current_period_end TEXT, contact_unlocks_used INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)").run()
   const info = await db.prepare('PRAGMA table_info(client_subscriptions)').all()
   const columns = new Set((info.results || []).map((row: any) => row.name))
   const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
+    if (!columns.has(name)) await db.prepare(sql).run()
   }
   await addColumn('stripe_customer_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_customer_id TEXT')
   await addColumn('stripe_subscription_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_subscription_id TEXT')
@@ -208,8 +196,8 @@ async function _ensureClientSubscriptionsTable(db: any): Promise<void> {
   await addColumn('status', "ALTER TABLE client_subscriptions ADD COLUMN status TEXT DEFAULT 'active'")
   await addColumn('current_period_end', 'ALTER TABLE client_subscriptions ADD COLUMN current_period_end TEXT')
   await addColumn('contact_unlocks_used', 'ALTER TABLE client_subscriptions ADD COLUMN contact_unlocks_used INTEGER DEFAULT 0')
-  await addColumn('created_at', 'ALTER TABLE client_subscriptions ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP')
-  await addColumn('updated_at', 'ALTER TABLE client_subscriptions ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP')
+  await addColumn('created_at', 'ALTER TABLE client_subscriptions ADD COLUMN created_at TEXT')
+  await addColumn('updated_at', 'ALTER TABLE client_subscriptions ADD COLUMN updated_at TEXT')
 }
 
 function _stripePeriodEnd(subscription: any): string {
