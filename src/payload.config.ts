@@ -183,6 +183,98 @@ async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
   await addColumn('created_at', 'ALTER TABLE caregiver_reviews ADD COLUMN created_at TEXT')
 }
 
+async function _ensureClientSubscriptionsTable(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS client_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    plan TEXT NOT NULL,
+    stripe_customer_id TEXT,
+    stripe_subscription_id TEXT,
+    stripe_session_id TEXT,
+    status TEXT DEFAULT 'active',
+    current_period_end TEXT,
+    contact_unlocks_used INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`)
+  const info = await db.prepare('PRAGMA table_info(client_subscriptions)').all()
+  const columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('stripe_customer_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_customer_id TEXT')
+  await addColumn('stripe_subscription_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_subscription_id TEXT')
+  await addColumn('stripe_session_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_session_id TEXT')
+  await addColumn('status', "ALTER TABLE client_subscriptions ADD COLUMN status TEXT DEFAULT 'active'")
+  await addColumn('current_period_end', 'ALTER TABLE client_subscriptions ADD COLUMN current_period_end TEXT')
+  await addColumn('contact_unlocks_used', 'ALTER TABLE client_subscriptions ADD COLUMN contact_unlocks_used INTEGER DEFAULT 0')
+  await addColumn('created_at', 'ALTER TABLE client_subscriptions ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP')
+  await addColumn('updated_at', 'ALTER TABLE client_subscriptions ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP')
+}
+
+function _stripePeriodEnd(subscription: any): string {
+  const raw = subscription && typeof subscription === 'object' ? subscription.current_period_end : null
+  if (raw) return new Date(Number(raw) * 1000).toISOString()
+  return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
+}
+
+async function _upsertClientSubscription(db: any, data: {
+  email: string
+  plan: string
+  stripeCustomerId?: string
+  stripeSubscriptionId?: string
+  stripeSessionId?: string
+  currentPeriodEnd?: string
+}): Promise<void> {
+  await _ensureClientSubscriptionsTable(db)
+  const email = data.email.toLowerCase()
+  const existing = data.stripeSessionId || data.stripeSubscriptionId
+    ? await db.prepare(
+        `SELECT id FROM client_subscriptions
+         WHERE (stripe_session_id = ? AND stripe_session_id != '')
+            OR (stripe_subscription_id = ? AND stripe_subscription_id != '')
+         LIMIT 1`
+      ).bind(data.stripeSessionId || '', data.stripeSubscriptionId || '').first()
+    : null
+
+  if (existing?.id) {
+    await db.prepare(
+      `UPDATE client_subscriptions
+       SET email = ?, plan = ?, stripe_customer_id = ?, stripe_subscription_id = ?,
+           stripe_session_id = ?, status = 'active', current_period_end = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    ).bind(
+      email,
+      data.plan,
+      data.stripeCustomerId || '',
+      data.stripeSubscriptionId || '',
+      data.stripeSessionId || '',
+      data.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+      existing.id,
+    ).run()
+    return
+  }
+
+  await db.prepare(
+    `UPDATE client_subscriptions
+     SET status = 'replaced', updated_at = datetime('now')
+     WHERE email = ? AND status = 'active'`
+  ).bind(email).run()
+
+  await db.prepare(
+    `INSERT INTO client_subscriptions
+      (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end)
+     VALUES (?, ?, ?, ?, ?, 'active', ?)`
+  ).bind(
+    email,
+    data.plan,
+    data.stripeCustomerId || '',
+    data.stripeSubscriptionId || '',
+    data.stripeSessionId || '',
+    data.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+  ).run()
+}
+
 function _activeTimerFromRow(row: any): any | null {
   if (!row) return null
   let parsed: any = {}
@@ -1932,17 +2024,13 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
               const clientEmail = session.metadata?.client_email || session.customer_email || ''
               const plan = session.metadata?.plan || 'essential'
               if (clientEmail) {
-                await (req as any).payload.db.execute({
-                  sql: 'INSERT INTO client_subscriptions (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  values: [
-                    clientEmail.toLowerCase(),
-                    plan,
-                    session.customer || '',
-                    session.subscription || '',
-                    session.id,
-                    'active',
-                    new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-                  ],
+                await _upsertClientSubscription(cloudflare.env.D1, {
+                  email: clientEmail,
+                  plan,
+                  stripeCustomerId: session.customer || '',
+                  stripeSubscriptionId: session.subscription || '',
+                  stripeSessionId: session.id,
+                  currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
                 })
               }
             }
@@ -2312,8 +2400,10 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { email, plan } = body
+          const { email, plan, caregiverId } = body
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
+
+          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
 
           const priceMap: Record<string, string> = {
             essential: 'price_1TQhO56E8zcVOY4tJyqfoiwi',
@@ -2324,6 +2414,11 @@ Return a JSON object with these fields:
           if (!priceId) return Response.json({ error: 'Invalid plan' }, { status: 400 })
 
           const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
+          const successUrl =
+            `https://app.carehia.com/?subscription=success&session_id={CHECKOUT_SESSION_ID}` +
+            `&plan=${encodeURIComponent(plan)}&email=${encodeURIComponent(email)}`
+          const cancelParams = new URLSearchParams({ subscription: 'cancelled' })
           const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
             method: 'POST',
             headers: {
@@ -2335,11 +2430,12 @@ Return a JSON object with these fields:
               'customer_email': email,
               'line_items[0][price]': priceId,
               'line_items[0][quantity]': '1',
-              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email),
-              'cancel_url': 'https://gotocare-client-portal.pages.dev/?subscription=cancelled',
+              'success_url': successUrl,
+              'cancel_url': `https://app.carehia.com/?${cancelParams.toString()}#profile`,
               'metadata[plan]': plan,
               'metadata[client_email]': email,
               'metadata[type]': 'client_subscription',
+              ...(caregiverId ? { 'metadata[caregiver_id]': String(caregiverId) } : {}),
               'allow_promotion_codes': 'true',
             }).toString(),
           })
@@ -2361,13 +2457,10 @@ Return a JSON object with these fields:
           const email = url.searchParams.get('email')
           if (!email) return Response.json({ subscribed: false, error: 'email required' }, { status: 400 })
 
-          const db = (req as any).payload?.db?.drizzle || (globalThis as any).D1
-          // Use raw D1 query via the adapter
-          const result = await (req as any).payload.db.execute({
-            sql: 'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
-            values: [email.toLowerCase(), 'active'],
-          })
-          const sub = result?.rows?.[0] || null
+          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
+          const sub = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(email.toLowerCase(), 'active').first()
           if (!sub) return Response.json({ subscribed: false, plan: null })
           // Check if subscription is still valid
           const now = new Date()
@@ -2393,24 +2486,93 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { email, plan, sessionId } = body
+          const { email, plan } = body
+          const sessionId = body.sessionId || body.session_id || ''
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
 
-          // Check if already recorded (idempotent)
+          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
+
+          if (sessionId) {
+            const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+            if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
+            const query = new URLSearchParams({ 'expand[]': 'subscription' })
+            const stripeRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}?${query.toString()}`, {
+              headers: { 'Authorization': `Bearer ${stripeKey}` },
+            })
+            const session = await stripeRes.json() as any
+            if (!stripeRes.ok) {
+              return Response.json({ error: session.error?.message || 'Unable to verify Stripe session' }, { status: 400 })
+            }
+            if (session.status !== 'complete' || !['paid', 'no_payment_required'].includes(session.payment_status || '')) {
+              return Response.json({ error: 'Stripe checkout is not complete' }, { status: 402 })
+            }
+            const sessionEmail = String(session.metadata?.client_email || session.customer_details?.email || session.customer_email || '').toLowerCase()
+            const requestedEmail = String(email).toLowerCase()
+            if (!sessionEmail || sessionEmail !== requestedEmail) {
+              return Response.json({ error: 'Stripe session does not match this client' }, { status: 403 })
+            }
+            const sessionPlan = String(session.metadata?.plan || plan)
+            if (sessionPlan !== plan) return Response.json({ error: 'Stripe session does not match this plan' }, { status: 403 })
+            const subscription = session.subscription
+            await _upsertClientSubscription(cloudflare.env.D1, {
+              email: requestedEmail,
+              plan: sessionPlan,
+              stripeCustomerId: session.customer || '',
+              stripeSubscriptionId: typeof subscription === 'string' ? subscription : subscription?.id || '',
+              stripeSessionId: session.id,
+              currentPeriodEnd: _stripePeriodEnd(subscription),
+            })
+            return Response.json({ success: true, plan: sessionPlan })
+          }
+
           const existing = await cloudflare.env.D1.prepare(
             'SELECT id FROM client_subscriptions WHERE email = ? AND plan = ? AND status = ?'
           ).bind(email.toLowerCase(), plan, 'active').first()
 
-          if (!existing) {
-            const periodEnd = new Date()
-            periodEnd.setMonth(periodEnd.getMonth() + 1)
-            await cloudflare.env.D1.prepare(
-              `INSERT INTO client_subscriptions (email, plan, stripe_session_id, status, current_period_end)
-               VALUES (?, ?, ?, 'active', ?)`
-            ).bind(email.toLowerCase(), plan, sessionId || '', periodEnd.toISOString()).run()
-          }
+          if (!existing) await _upsertClientSubscription(cloudflare.env.D1, { email, plan, stripeSessionId: '' })
 
           return Response.json({ success: true, plan })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== CREATE CLIENT BILLING PORTAL ======
+    {
+      path: '/create-client-billing-portal',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const email = String(body.email || '').toLowerCase()
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+
+          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
+          const sub = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(email, 'active').first()
+          if (!sub?.stripe_customer_id) {
+            return Response.json({ error: 'No Stripe customer found for this subscription' }, { status: 404 })
+          }
+
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
+          const stripeRes = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${stripeKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: new URLSearchParams({
+              customer: sub.stripe_customer_id,
+              return_url: 'https://app.carehia.com/#profile',
+            }).toString(),
+          })
+          const session = await stripeRes.json() as any
+          if (!stripeRes.ok || !session.url) {
+            return Response.json({ error: session.error?.message || 'Could not open billing portal' }, { status: 500 })
+          }
+          return Response.json({ success: true, url: session.url })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
