@@ -183,6 +183,111 @@ async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
   await addColumn('created_at', 'ALTER TABLE caregiver_reviews ADD COLUMN created_at TEXT')
 }
 
+function _normalizeScheduleDays(value: any): string {
+  const dayMap: Record<string, string> = {
+    monday: 'Mon',
+    mon: 'Mon',
+    tuesday: 'Tue',
+    tue: 'Tue',
+    tues: 'Tue',
+    wednesday: 'Wed',
+    wed: 'Wed',
+    thursday: 'Thu',
+    thu: 'Thu',
+    thur: 'Thu',
+    thurs: 'Thu',
+    friday: 'Fri',
+    fri: 'Fri',
+    saturday: 'Sat',
+    sat: 'Sat',
+    sunday: 'Sun',
+    sun: 'Sun',
+  }
+  let items: string[] = []
+  if (Array.isArray(value)) {
+    items = value
+  } else {
+    const raw = String(value || '').trim()
+    if (!raw) return ''
+    try {
+      const parsed = JSON.parse(raw)
+      items = Array.isArray(parsed) ? parsed : raw.split(',')
+    } catch (_) {
+      items = raw.split(',')
+    }
+  }
+  const seen = new Set<string>()
+  return items
+    .map((day) => dayMap[String(day || '').trim().toLowerCase()] || String(day || '').trim())
+    .filter(Boolean)
+    .filter((day) => {
+      if (seen.has(day)) return false
+      seen.add(day)
+      return true
+    })
+    .join(',')
+}
+
+async function _ensureCareSchedulesTable(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS care_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_email TEXT NOT NULL,
+    caregiver_email TEXT NOT NULL,
+    days TEXT NOT NULL,
+    start_time TEXT NOT NULL,
+    end_time TEXT NOT NULL,
+    care_type TEXT,
+    notes TEXT,
+    is_recurring INTEGER DEFAULT 1,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`)
+  const info = await db.prepare('PRAGMA table_info(care_schedules)').all()
+  const columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('client_email', 'ALTER TABLE care_schedules ADD COLUMN client_email TEXT')
+  await addColumn('caregiver_email', 'ALTER TABLE care_schedules ADD COLUMN caregiver_email TEXT')
+  await addColumn('days', 'ALTER TABLE care_schedules ADD COLUMN days TEXT')
+  await addColumn('start_time', 'ALTER TABLE care_schedules ADD COLUMN start_time TEXT')
+  await addColumn('end_time', 'ALTER TABLE care_schedules ADD COLUMN end_time TEXT')
+  await addColumn('care_type', 'ALTER TABLE care_schedules ADD COLUMN care_type TEXT')
+  await addColumn('notes', 'ALTER TABLE care_schedules ADD COLUMN notes TEXT')
+  await addColumn('is_recurring', 'ALTER TABLE care_schedules ADD COLUMN is_recurring INTEGER DEFAULT 1')
+  await addColumn('created_at', 'ALTER TABLE care_schedules ADD COLUMN created_at TEXT')
+}
+
+async function _ensureCaregiverPrivateClientsTable(db: any): Promise<void> {
+  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_private_clients (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    caregiver_email TEXT NOT NULL,
+    name TEXT NOT NULL,
+    email TEXT,
+    phone TEXT,
+    hourly_rate REAL DEFAULT 0,
+    care_type TEXT,
+    billing_type TEXT DEFAULT 'hourly',
+    ot_after_hrs REAL DEFAULT 8,
+    ot_multiplier REAL DEFAULT 1.5,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+  )`)
+  const info = await db.prepare('PRAGMA table_info(caregiver_private_clients)').all()
+  const columns = new Set((info.results || []).map((row: any) => row.name))
+  const addColumn = async (name: string, sql: string) => {
+    if (!columns.has(name)) await db.exec(sql)
+  }
+  await addColumn('caregiver_email', 'ALTER TABLE caregiver_private_clients ADD COLUMN caregiver_email TEXT')
+  await addColumn('name', 'ALTER TABLE caregiver_private_clients ADD COLUMN name TEXT')
+  await addColumn('email', 'ALTER TABLE caregiver_private_clients ADD COLUMN email TEXT')
+  await addColumn('phone', 'ALTER TABLE caregiver_private_clients ADD COLUMN phone TEXT')
+  await addColumn('hourly_rate', 'ALTER TABLE caregiver_private_clients ADD COLUMN hourly_rate REAL DEFAULT 0')
+  await addColumn('care_type', 'ALTER TABLE caregiver_private_clients ADD COLUMN care_type TEXT')
+  await addColumn('billing_type', "ALTER TABLE caregiver_private_clients ADD COLUMN billing_type TEXT DEFAULT 'hourly'")
+  await addColumn('ot_after_hrs', 'ALTER TABLE caregiver_private_clients ADD COLUMN ot_after_hrs REAL DEFAULT 8')
+  await addColumn('ot_multiplier', 'ALTER TABLE caregiver_private_clients ADD COLUMN ot_multiplier REAL DEFAULT 1.5')
+  await addColumn('created_at', 'ALTER TABLE caregiver_private_clients ADD COLUMN created_at TEXT')
+}
+
 async function _ensureClientSubscriptionsTable(db: any): Promise<void> {
   await db.prepare("CREATE TABLE IF NOT EXISTS client_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, plan TEXT NOT NULL, stripe_customer_id TEXT, stripe_subscription_id TEXT, stripe_session_id TEXT, status TEXT DEFAULT 'active', current_period_end TEXT, contact_unlocks_used INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)").run()
   const info = await db.prepare('PRAGMA table_info(client_subscriptions)').all()
@@ -4455,9 +4560,10 @@ Return a JSON object with these fields:
           if (!clientToken || !caregiverEmail || !days || !startTime || !endTime) {
             return Response.json({ success: false, error: 'Missing required fields' }, { headers })
           }
+          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
-          const daysStr = Array.isArray(days) ? days.join(',') : days
+          const daysStr = _normalizeScheduleDays(days)
           // Upsert: delete existing then insert
           await env.D1.prepare('DELETE FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(sess.email, caregiverEmail).run()
           await env.D1.prepare(
@@ -4480,6 +4586,7 @@ Return a JSON object with these fields:
           const clientToken = url.searchParams.get('clientToken') || ''
           const caregiverEmail = url.searchParams.get('caregiverEmail') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
+          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           if (caregiverEmail) {
@@ -4523,6 +4630,10 @@ Return a JSON object with these fields:
             care_types TEXT,
             start_date TEXT,
             schedule_notes TEXT,
+            schedule_days TEXT,
+            schedule_start_time TEXT,
+            schedule_end_time TEXT,
+            schedule_is_recurring INTEGER DEFAULT 1,
             client_name TEXT,
             client_signature TEXT,
             client_signed_at TEXT,
@@ -4532,9 +4643,15 @@ Return a JSON object with these fields:
             created_at TEXT DEFAULT (datetime('now'))
           )`).run()
           // Add new columns if missing (v2)
-          try { await env.D1.prepare("ALTER TABLE hire_agreements ADD COLUMN hours_per_week TEXT DEFAULT ''").run() } catch(_) {}
+          for (const col of [
+            "ALTER TABLE hire_agreements ADD COLUMN hours_per_week TEXT DEFAULT ''",
+            "ALTER TABLE hire_agreements ADD COLUMN schedule_days TEXT DEFAULT ''",
+            "ALTER TABLE hire_agreements ADD COLUMN schedule_start_time TEXT DEFAULT ''",
+            "ALTER TABLE hire_agreements ADD COLUMN schedule_end_time TEXT DEFAULT ''",
+            "ALTER TABLE hire_agreements ADD COLUMN schedule_is_recurring INTEGER DEFAULT 1",
+          ]) { try { await env.D1.prepare(col).run() } catch(_) {} }
           const body = await req.json()
-          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, negotiatedRate, hoursPerWeek } = body
+          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, negotiatedRate, hoursPerWeek, scheduleDays, scheduleStartTime, scheduleEndTime, scheduleRecurring } = body
           if (!clientToken || !caregiverId) {
             return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
           }
@@ -4549,14 +4666,19 @@ Return a JSON object with these fields:
           const finalRate = negotiatedRate || cg.hourly_rate || 0
           const agreementToken = crypto.randomUUID() + '-' + crypto.randomUUID()
           const now = new Date().toISOString()
+          const daysStr = _normalizeScheduleDays(scheduleDays)
+          const scheduleStart = String(scheduleStartTime || '').trim()
+          const scheduleEnd = String(scheduleEndTime || '').trim()
+          const isRecurring = scheduleRecurring === false ? 0 : 1
           // Insert agreement (no client signature yet - caregiver signs first)
           await env.D1.prepare(
-            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, client_name, hours_per_week, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
+            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, schedule_days, schedule_start_time, schedule_end_time, schedule_is_recurring, client_name, hours_per_week, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
           ).bind(
             agreementToken, sess.email, caregiverId, cg.name, cg.photo_url || null,
             finalRate, JSON.stringify(careTypes || []),
             startDate || null, scheduleNotes || null,
+            daysStr, scheduleStart, scheduleEnd, isRecurring,
             sess.name || sess.email, hoursPerWeek || ''
           ).run()
           // Upsert into client_team
@@ -4707,6 +4829,8 @@ Return a JSON object with these fields:
           if (cg2?.email) { try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: cg2.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {} }
           // Auto-populate care_schedules + caregiver_private_clients from signed hire agreement
           try {
+            await _ensureCareSchedulesTable(env.D1)
+            await _ensureCaregiverPrivateClientsTable(env.D1)
             const schedNotes = agreement.schedule_notes || ''
             const dayNameMap: Record<string,string> = { 'Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed','Thursday':'Thu','Friday':'Fri','Saturday':'Sat','Sunday':'Sun' }
             const dayMatch = schedNotes.match(/Days:\s*([^\n]+)/)
@@ -4714,14 +4838,20 @@ Return a JSON object with these fields:
             const parsedDays = dayMatch ? dayMatch[1].split(',').map((d: string) => dayNameMap[d.trim()] || d.trim()).join(',') : ''
             const parsedStart = hrMatch ? hrMatch[1] : ''
             const parsedEnd = hrMatch ? hrMatch[2] : ''
+            const scheduleDaysFinal = _normalizeScheduleDays(agreement.schedule_days || parsedDays)
+            const scheduleStartFinal = String(agreement.schedule_start_time || parsedStart).trim()
+            const scheduleEndFinal = String(agreement.schedule_end_time || parsedEnd).trim()
+            const scheduleRecurringFinal = Number(agreement.schedule_is_recurring ?? 1) ? 1 : 0
             let careTypesList: string[] = []
             try { careTypesList = JSON.parse(agreement.care_types || '[]') } catch (_) {}
             const careTypeFirst = careTypesList[0] || ''
             const cgEmail2 = cg2?.email || ''
-            if (parsedDays && parsedStart && parsedEnd && cgEmail2) {
+            if (scheduleDaysFinal && scheduleStartFinal && scheduleEndFinal && cgEmail2) {
               const existingSched = await env.D1.prepare('SELECT id FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(agreement.client_email, cgEmail2).first()
               if (!existingSched) {
-                await env.D1.prepare('INSERT INTO care_schedules (client_email, caregiver_email, days, start_time, end_time, care_type, notes, is_recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(agreement.client_email, cgEmail2, parsedDays, parsedStart, parsedEnd, careTypeFirst, schedNotes).run()
+                await env.D1.prepare('INSERT INTO care_schedules (client_email, caregiver_email, days, start_time, end_time, care_type, notes, is_recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(agreement.client_email, cgEmail2, scheduleDaysFinal, scheduleStartFinal, scheduleEndFinal, careTypeFirst, schedNotes, scheduleRecurringFinal).run()
+              } else {
+                await env.D1.prepare('UPDATE care_schedules SET days = ?, start_time = ?, end_time = ?, care_type = ?, notes = ?, is_recurring = ? WHERE id = ?').bind(scheduleDaysFinal, scheduleStartFinal, scheduleEndFinal, careTypeFirst, schedNotes, scheduleRecurringFinal, (existingSched as any).id).run()
               }
             }
             if (cgEmail2 && agreement.client_email) {
@@ -5234,6 +5364,7 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           const result = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_private_clients WHERE caregiver_email = ? ORDER BY name ASC'
           ).bind(session.caregiver_email).all()
@@ -5268,6 +5399,7 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           const r = await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
@@ -5295,6 +5427,7 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           await cloudflare.env.D1.prepare(
             'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_email = ?'
           ).bind(Number(cloudId), session.caregiver_email).run()
@@ -6890,6 +7023,7 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
           const cgAcc = await env.D1.prepare('SELECT email, name FROM caregiver_accounts WHERE id = ?').bind(sess.account_id).first() as any
