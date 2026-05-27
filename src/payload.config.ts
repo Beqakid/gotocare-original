@@ -124,6 +124,55 @@ async function _sendPushBatch(db: any, cgIds: number[], vapidPub: string, vapidP
   return sent;
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// AUTHORIZATION HELPERS — strict role enforcement
+// All helpers close over cloudflare.env.D1
+// ═══════════════════════════════════════════════════════════════════════
+
+/** Validate caregiver session. Returns { account_id, email } or null.
+ *  Accepts: Authorization: Bearer <token>, x-caregiver-token header, or ?token= query param. */
+async function _requireCgAuth(req: any): Promise<{ account_id: number; email: string } | null> {
+  const url = new URL(req.url)
+  const authHdr = req.headers?.get('Authorization') || ''
+  const token = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') ||
+    req.headers?.get('x-caregiver-token') || url.searchParams.get('token') || ''
+  if (!token) return null
+  const row = await (cloudflare.env as any).D1.prepare(
+    "SELECT cs.account_id, ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+  ).bind(token).first() as any
+  if (!row) return null
+  return { account_id: row.account_id, email: row.email }
+}
+
+/** Validate client session. Returns { email } or null.
+ *  Accepts: Authorization: Bearer <token>, x-session-token header, or ?clientToken= / ?token= query param. */
+async function _requireClientAuth(req: any): Promise<{ email: string } | null> {
+  const url = new URL(req.url)
+  const authHdr = req.headers?.get('Authorization') || ''
+  const token = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') ||
+    req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || url.searchParams.get('token') || ''
+  if (!token) return null
+  const row = await (cloudflare.env as any).D1.prepare(
+    "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
+  ).bind(token).first() as any
+  if (!row) return null
+  return { email: row.email }
+}
+
+/** Extract clientToken from body or headers (for POST endpoints). */
+async function _requireClientAuthFromBody(req: any, body: any): Promise<{ email: string } | null> {
+  const authHdr = req.headers?.get('Authorization') || ''
+  const token = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') ||
+    req.headers?.get('x-session-token') || body?.clientToken || ''
+  if (!token) return null
+  const row = await (cloudflare.env as any).D1.prepare(
+    "SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime('now')"
+  ).bind(token).first() as any
+  if (!row) return null
+  return { email: row.email }
+}
+
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -2135,8 +2184,12 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { email, caregiverId } = body
-          if (!email || !caregiverId) return Response.json({ error: 'email and caregiverId required' }, { status: 400 })
+          // AUTHZ-07: Require client session — derive email from session, not body
+          const clientSess = await _requireClientAuthFromBody(req, body)
+          if (!clientSess) return Response.json({ error: 'Authentication required' }, { status: 401 })
+          const { caregiverId } = body
+          const email = clientSess.email  // always use authenticated session email
+          if (!caregiverId) return Response.json({ error: 'caregiverId required' }, { status: 400 })
 
           // Check subscription
           const subResult = await (req as any).payload.db.execute({
@@ -2370,9 +2423,13 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes } = body
-          if (!caregiverId || !clientEmail || !preferredDate) {
-            return Response.json({ error: 'caregiverId, clientEmail, preferredDate required' }, { status: 400 })
+          // AUTHZ-05: Require client session — derive email from token, not body
+          const clientSess = await _requireClientAuthFromBody(req, body)
+          if (!clientSess) return Response.json({ error: 'Authentication required. Please sign in to book an interview.' }, { status: 401 })
+          const { caregiverId, careNeeds, preferredDate, preferredTime, interviewType, notes } = body
+          const clientEmail = clientSess.email  // always use authenticated session email
+          if (!caregiverId || !preferredDate) {
+            return Response.json({ error: 'caregiverId and preferredDate required' }, { status: 400 })
           }
           await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_bookings (caregiver_id, client_email, care_needs, preferred_date, preferred_time, interview_type, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -2593,14 +2650,22 @@ Return a JSON object with these fields:
       method: 'post',
       handler: async (req) => {
         try {
+          // AUTHZ-02: Require caregiver session + verify booking ownership
+          const cgSess = await _requireCgAuth(req)
+          if (!cgSess) return Response.json({ error: 'Caregiver authentication required' }, { status: 401 })
           const body = await req.json()
           const { bookingId, status } = body
           if (!bookingId || !['accepted', 'declined'].includes(status)) {
             return Response.json({ error: 'bookingId and valid status (accepted/declined) required' }, { status: 400 })
           }
+          // Verify this booking was dispatched to this caregiver
+          const booking = await (cloudflare.env as any).D1.prepare(
+            'SELECT id FROM caregiver_bookings WHERE id = ? AND caregiver_id = ?'
+          ).bind(Number(bookingId), cgSess.account_id).first()
+          if (!booking) return Response.json({ error: 'Booking not found or not assigned to you' }, { status: 403 })
           await cloudflare.env.D1.prepare(
-            'UPDATE caregiver_bookings SET status = ? WHERE id = ?'
-          ).bind(status, Number(bookingId)).run()
+            'UPDATE caregiver_bookings SET status = ? WHERE id = ? AND caregiver_id = ?'
+          ).bind(status, Number(bookingId), cgSess.account_id).run()
           return Response.json({ success: true, bookingId, status })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
@@ -2613,9 +2678,10 @@ Return a JSON object with these fields:
       method: 'get',
       handler: async (req) => {
         try {
-          const url = new URL(req.url)
-          const email = url.searchParams.get('email')
-          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+          // AUTHZ-01: Require valid client session — email alone is not sufficient auth
+          const clientSess = await _requireClientAuth(req)
+          if (!clientSess) return Response.json({ error: 'Authentication required' }, { status: 401 })
+          const email = clientSess.email  // derive from session, ignore URL param
           const result = await cloudflare.env.D1.prepare(
             `SELECT cb.id, cb.caregiver_id, cb.care_needs, cb.preferred_date, cb.preferred_time,
              cb.interview_type, cb.notes, cb.status, cb.created_at,
@@ -2655,10 +2721,14 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { bookingId, clientEmail, preferredDate, preferredTime, interviewType, notes } = body
-          if (!bookingId || !clientEmail) return Response.json({ error: 'bookingId and clientEmail required' }, { status: 400 })
+          // AUTHZ-03: Require client session — derive email from token, not from body
+          const clientSess = await _requireClientAuthFromBody(req, body)
+          if (!clientSess) return Response.json({ error: 'Authentication required' }, { status: 401 })
+          const { bookingId, preferredDate, preferredTime, interviewType, notes } = body
+          const clientEmail = clientSess.email  // always use session email
+          if (!bookingId) return Response.json({ error: 'bookingId required' }, { status: 400 })
 
-          // Verify this booking belongs to the client
+          // Verify this booking belongs to the authenticated client
           const booking = await cloudflare.env.D1.prepare(
             'SELECT id, status FROM caregiver_bookings WHERE id = ? AND client_email = ?'
           ).bind(bookingId, clientEmail.toLowerCase()).first()
@@ -2693,10 +2763,14 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { bookingId, clientEmail } = body
-          if (!bookingId || !clientEmail) return Response.json({ error: 'bookingId and clientEmail required' }, { status: 400 })
+          // AUTHZ-04: Require client session — derive email from token, not from body
+          const clientSess = await _requireClientAuthFromBody(req, body)
+          if (!clientSess) return Response.json({ error: 'Authentication required' }, { status: 401 })
+          const { bookingId } = body
+          const clientEmail = clientSess.email  // always use session email
+          if (!bookingId) return Response.json({ error: 'bookingId required' }, { status: 400 })
 
-          // Verify this booking belongs to the client
+          // Verify this booking belongs to the authenticated client
           const booking = await cloudflare.env.D1.prepare(
             'SELECT id, status FROM caregiver_bookings WHERE id = ? AND client_email = ?'
           ).bind(bookingId, clientEmail.toLowerCase()).first()
@@ -4719,6 +4793,26 @@ Return a JSON object with these fields:
           const { caregiverEmail, caregiverName, bookingId } = body
           if (!caregiverEmail) return Response.json({ success: false, error: 'caregiverEmail required' }, { status: 400, headers })
 
+          // AUTHZ-09: Rate limit nudge emails per IP (5/hour) to prevent email spam abuse
+          const ip = req.headers?.get('CF-Connecting-IP') || 'unknown'
+          const db = (cloudflare as any).env.D1
+          const window = Math.floor(Date.now() / (1000 * 3600))  // 1-hour window
+          const nudgeKey = 'nudge_' + ip
+          const attempt = await db.prepare(
+            "SELECT attempts, window_key FROM login_attempts WHERE ip = ? AND endpoint = ? LIMIT 1"
+          ).bind(ip, nudgeKey).first() as any
+          if (attempt && attempt.window_key === String(window) && attempt.attempts >= 5) {
+            return Response.json({ success: false, error: 'Too many nudge requests. Please try again later.' }, { status: 429, headers })
+          }
+          if (attempt && attempt.window_key === String(window)) {
+            await db.prepare("UPDATE login_attempts SET attempts = attempts + 1 WHERE ip = ? AND endpoint = ?").bind(ip, nudgeKey).run()
+          } else {
+            await db.prepare("INSERT OR REPLACE INTO login_attempts (ip, endpoint, attempts, window_key) VALUES (?, ?, 1, ?)").bind(ip, nudgeKey, String(window)).run()
+          }
+          // Validate caregiverEmail exists in our system (prevent arbitrary email targeting)
+          const cgRow = await db.prepare('SELECT id FROM caregiver_accounts WHERE email = ?').bind(caregiverEmail.toLowerCase()).first()
+          if (!cgRow) return Response.json({ success: true }, { headers })  // silently succeed (don't reveal existence)
+
           const resendKey = cloudflare.env.RESEND_API_KEY
           if (!resendKey) return Response.json({ success: false, error: 'RESEND_API_KEY not configured' }, { status: 500, headers })
 
@@ -5082,10 +5176,10 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
           await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
-          const avail = await db.prepare('SELECT availability_json FROM caregiver_availability WHERE caregiver_id = ?').bind((session as any).caregiver_id).first()
+          const avail = await db.prepare('SELECT availability_json FROM caregiver_availability WHERE caregiver_id = ?').bind((session as any).account_id).first()
           return Response.json({ success: true, availability: avail ? JSON.parse((avail as any).availability_json || '{}') : {} }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -5103,10 +5197,10 @@ Return a JSON object with these fields:
           const body = await req.json()
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
           await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_availability (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL UNIQUE, availability_json TEXT, updated_at TEXT DEFAULT (datetime('now')))`)
-          await db.prepare('INSERT OR REPLACE INTO caregiver_availability (caregiver_id, availability_json, updated_at) VALUES (?, ?, datetime(\'now\'))').bind((session as any).caregiver_id, JSON.stringify(body.availability || {})).run()
+          await db.prepare('INSERT OR REPLACE INTO caregiver_availability (caregiver_id, availability_json, updated_at) VALUES (?, ?, datetime(\'now\'))').bind((session as any).account_id, JSON.stringify(body.availability || {})).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -5126,9 +5220,9 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
-          const cgId = (session as any).caregiver_id
+          const cgId = (session as any).account_id
           const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
           const idVerif = await db.prepare('SELECT status, doc_type, submitted_at FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY id DESC LIMIT 1').bind(cgId).first()
           const bgCheck = await db.prepare('SELECT status, initiated_at, completed_at, expires_at FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
@@ -5205,9 +5299,9 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
-          const cgId = (session as any).caregiver_id
+          const cgId = (session as any).account_id
           const now = new Date().toISOString()
           const exp = new Date(Date.now() + 365*24*3600*1000).toISOString()
           await db.prepare('INSERT OR REPLACE INTO caregiver_background_checks (caregiver_id, status, provider, initiated_at, expires_at) VALUES (?, ?, ?, ?, ?)').bind(cgId, 'pending', 'manual_review', now, exp).run()
@@ -5229,9 +5323,9 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
-          const cgId = (session as any).caregiver_id
+          const cgId = (session as any).account_id
           const formData = await req.formData()
           const file = formData.get('file')
           const docType = formData.get('doc_type') || 'id_document'
@@ -5263,9 +5357,9 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token')
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
           const db = (cloudflare as any).env.D1
-          const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
+          const session = await db.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
-          const cgId = (session as any).caregiver_id
+          const cgId = (session as any).account_id
           const formData = await req.formData()
           const certType = formData.get('cert_type') || 'other'
           const expiry = formData.get('expiry') || ''
@@ -5320,11 +5414,13 @@ Return a JSON object with these fields:
           if (!caregiverId || !rating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
           if (rating < 1 || rating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          let clientEmail = body.clientEmail || 'anonymous'
-          if (clientToken) {
-            const sess = await db.prepare('SELECT email FROM client_sessions WHERE session_token = ?').bind(clientToken).first()
-            if (sess) clientEmail = (sess as any).email
-          }
+          // AUTHZ-06: Require valid client session — no anonymous reviews allowed
+          const authHdr = req.headers?.get('Authorization') || ''
+          const resolvedToken = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') || clientToken || ''
+          if (!resolvedToken) return Response.json({ success: false, error: 'Authentication required to submit a review' }, { status: 401, headers })
+          const reviewSess = await db.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(resolvedToken).first() as any
+          if (!reviewSess) return Response.json({ success: false, error: 'Invalid or expired session' }, { status: 401, headers })
+          const clientEmail = reviewSess.email
           const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
           const isRepeat = ((prior as any)?.cnt || 0) > 1 ? 1 : 0
           await db.prepare('INSERT INTO caregiver_reviews (caregiver_id, client_email, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(parseInt(caregiverId), clientEmail, bookingId||null, rating, reviewText||'', isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
@@ -5345,11 +5441,16 @@ Return a JSON object with these fields:
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
+          // AUTHZ-08: Require caregiver session + verify caregiverId matches session
+          const cgSess = await _requireCgAuth(req)
+          if (!cgSess) return Response.json({ success: false, error: 'Caregiver authentication required' }, { status: 401, headers })
           const body = await req.json()
           const { caregiverId, responseMinutes, accepted, completed } = body
           if (!caregiverId) return Response.json({ success: false, error: 'caregiverId required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
           const cgId = parseInt(caregiverId)
+          // Verify the caregiver can only update their own metrics
+          if (cgId !== cgSess.account_id) return Response.json({ success: false, error: 'Forbidden: cannot update another caregiver\'s metrics' }, { status: 403, headers })
           const existing = await db.prepare('SELECT * FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(cgId).first()
           if (existing) {
             const ex = existing as any
