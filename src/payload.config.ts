@@ -124,479 +124,6 @@ async function _sendPushBatch(db: any, cgIds: number[], vapidPub: string, vapidP
   return sent;
 }
 
-async function _ensurePersonalInvoiceSendColumns(db: any): Promise<void> {
-  const info = await db.prepare('PRAGMA table_info(caregiver_personal_invoices)').all()
-  const columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
-  }
-  await addColumn('client_email', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN client_email TEXT')
-  await addColumn('sent_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN sent_at TEXT')
-  await addColumn('last_sent_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN last_sent_at TEXT')
-  await addColumn('send_count', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN send_count INTEGER DEFAULT 0')
-  await addColumn('email_id', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN email_id TEXT')
-  await addColumn('paid_at', 'ALTER TABLE caregiver_personal_invoices ADD COLUMN paid_at TEXT')
-}
-
-async function _ensureCaregiverActiveTimerTable(db: any): Promise<Set<string>> {
-  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_active_timer (
-    caregiver_email TEXT PRIMARY KEY,
-    timer_json TEXT,
-    start_time TEXT,
-    client_name TEXT,
-    is_running INTEGER DEFAULT 1,
-    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )`)
-  let info = await db.prepare('PRAGMA table_info(caregiver_active_timer)').all()
-  let columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
-  }
-  await addColumn('timer_json', 'ALTER TABLE caregiver_active_timer ADD COLUMN timer_json TEXT')
-  await addColumn('start_time', 'ALTER TABLE caregiver_active_timer ADD COLUMN start_time TEXT')
-  await addColumn('client_name', 'ALTER TABLE caregiver_active_timer ADD COLUMN client_name TEXT')
-  await addColumn('is_running', 'ALTER TABLE caregiver_active_timer ADD COLUMN is_running INTEGER DEFAULT 1')
-  await addColumn('updated_at', 'ALTER TABLE caregiver_active_timer ADD COLUMN updated_at TEXT DEFAULT CURRENT_TIMESTAMP')
-  info = await db.prepare('PRAGMA table_info(caregiver_active_timer)').all()
-  columns = new Set((info.results || []).map((row: any) => row.name))
-  return columns
-}
-
-async function _ensureCaregiverReviewsTable(db: any): Promise<void> {
-  await db.exec('CREATE TABLE IF NOT EXISTS caregiver_reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, caregiver_id INTEGER NOT NULL, client_email TEXT, client_name TEXT, booking_id INTEGER, rating INTEGER NOT NULL, review_text TEXT, is_repeat_client INTEGER DEFAULT 0, is_punctual INTEGER DEFAULT 0, is_caring INTEGER DEFAULT 0, is_communicative INTEGER DEFAULT 0, is_professional INTEGER DEFAULT 0, would_hire_again INTEGER DEFAULT 0, is_visible INTEGER DEFAULT 1, created_at TEXT DEFAULT CURRENT_TIMESTAMP)')
-  const info = await db.prepare('PRAGMA table_info(caregiver_reviews)').all()
-  const columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
-  }
-  await addColumn('client_email', 'ALTER TABLE caregiver_reviews ADD COLUMN client_email TEXT')
-  await addColumn('client_name', 'ALTER TABLE caregiver_reviews ADD COLUMN client_name TEXT')
-  await addColumn('booking_id', 'ALTER TABLE caregiver_reviews ADD COLUMN booking_id INTEGER')
-  await addColumn('review_text', 'ALTER TABLE caregiver_reviews ADD COLUMN review_text TEXT')
-  await addColumn('is_repeat_client', 'ALTER TABLE caregiver_reviews ADD COLUMN is_repeat_client INTEGER DEFAULT 0')
-  await addColumn('is_punctual', 'ALTER TABLE caregiver_reviews ADD COLUMN is_punctual INTEGER DEFAULT 0')
-  await addColumn('is_caring', 'ALTER TABLE caregiver_reviews ADD COLUMN is_caring INTEGER DEFAULT 0')
-  await addColumn('is_communicative', 'ALTER TABLE caregiver_reviews ADD COLUMN is_communicative INTEGER DEFAULT 0')
-  await addColumn('is_professional', 'ALTER TABLE caregiver_reviews ADD COLUMN is_professional INTEGER DEFAULT 0')
-  await addColumn('would_hire_again', 'ALTER TABLE caregiver_reviews ADD COLUMN would_hire_again INTEGER DEFAULT 0')
-  await addColumn('is_visible', 'ALTER TABLE caregiver_reviews ADD COLUMN is_visible INTEGER DEFAULT 1')
-  await addColumn('created_at', 'ALTER TABLE caregiver_reviews ADD COLUMN created_at TEXT')
-}
-
-function _normalizeScheduleDays(value: any): string {
-  const dayMap: Record<string, string> = {
-    monday: 'Mon',
-    mon: 'Mon',
-    tuesday: 'Tue',
-    tue: 'Tue',
-    tues: 'Tue',
-    wednesday: 'Wed',
-    wed: 'Wed',
-    thursday: 'Thu',
-    thu: 'Thu',
-    thur: 'Thu',
-    thurs: 'Thu',
-    friday: 'Fri',
-    fri: 'Fri',
-    saturday: 'Sat',
-    sat: 'Sat',
-    sunday: 'Sun',
-    sun: 'Sun',
-  }
-  let items: string[] = []
-  if (Array.isArray(value)) {
-    items = value
-  } else {
-    const raw = String(value || '').trim()
-    if (!raw) return ''
-    try {
-      const parsed = JSON.parse(raw)
-      items = Array.isArray(parsed) ? parsed : raw.split(',')
-    } catch (_) {
-      items = raw.split(',')
-    }
-  }
-  const seen = new Set<string>()
-  return items
-    .map((day) => dayMap[String(day || '').trim().toLowerCase()] || String(day || '').trim())
-    .filter(Boolean)
-    .filter((day) => {
-      if (seen.has(day)) return false
-      seen.add(day)
-      return true
-    })
-    .join(',')
-}
-
-async function _ensureCareSchedulesTable(db: any): Promise<void> {
-  await db.exec(`CREATE TABLE IF NOT EXISTS care_schedules (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    client_email TEXT NOT NULL,
-    caregiver_email TEXT NOT NULL,
-    days TEXT NOT NULL,
-    start_time TEXT NOT NULL,
-    end_time TEXT NOT NULL,
-    care_type TEXT,
-    notes TEXT,
-    is_recurring INTEGER DEFAULT 1,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )`)
-  const info = await db.prepare('PRAGMA table_info(care_schedules)').all()
-  const columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
-  }
-  await addColumn('client_email', 'ALTER TABLE care_schedules ADD COLUMN client_email TEXT')
-  await addColumn('caregiver_email', 'ALTER TABLE care_schedules ADD COLUMN caregiver_email TEXT')
-  await addColumn('days', 'ALTER TABLE care_schedules ADD COLUMN days TEXT')
-  await addColumn('start_time', 'ALTER TABLE care_schedules ADD COLUMN start_time TEXT')
-  await addColumn('end_time', 'ALTER TABLE care_schedules ADD COLUMN end_time TEXT')
-  await addColumn('care_type', 'ALTER TABLE care_schedules ADD COLUMN care_type TEXT')
-  await addColumn('notes', 'ALTER TABLE care_schedules ADD COLUMN notes TEXT')
-  await addColumn('is_recurring', 'ALTER TABLE care_schedules ADD COLUMN is_recurring INTEGER DEFAULT 1')
-  await addColumn('created_at', 'ALTER TABLE care_schedules ADD COLUMN created_at TEXT')
-}
-
-async function _ensureCaregiverPrivateClientsTable(db: any): Promise<void> {
-  await db.exec(`CREATE TABLE IF NOT EXISTS caregiver_private_clients (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    caregiver_email TEXT NOT NULL,
-    name TEXT NOT NULL,
-    email TEXT,
-    phone TEXT,
-    hourly_rate REAL DEFAULT 0,
-    care_type TEXT,
-    billing_type TEXT DEFAULT 'hourly',
-    ot_after_hrs REAL DEFAULT 8,
-    ot_multiplier REAL DEFAULT 1.5,
-    created_at TEXT DEFAULT CURRENT_TIMESTAMP
-  )`)
-  const info = await db.prepare('PRAGMA table_info(caregiver_private_clients)').all()
-  const columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.exec(sql)
-  }
-  await addColumn('caregiver_email', 'ALTER TABLE caregiver_private_clients ADD COLUMN caregiver_email TEXT')
-  await addColumn('name', 'ALTER TABLE caregiver_private_clients ADD COLUMN name TEXT')
-  await addColumn('email', 'ALTER TABLE caregiver_private_clients ADD COLUMN email TEXT')
-  await addColumn('phone', 'ALTER TABLE caregiver_private_clients ADD COLUMN phone TEXT')
-  await addColumn('hourly_rate', 'ALTER TABLE caregiver_private_clients ADD COLUMN hourly_rate REAL DEFAULT 0')
-  await addColumn('care_type', 'ALTER TABLE caregiver_private_clients ADD COLUMN care_type TEXT')
-  await addColumn('billing_type', "ALTER TABLE caregiver_private_clients ADD COLUMN billing_type TEXT DEFAULT 'hourly'")
-  await addColumn('ot_after_hrs', 'ALTER TABLE caregiver_private_clients ADD COLUMN ot_after_hrs REAL DEFAULT 8')
-  await addColumn('ot_multiplier', 'ALTER TABLE caregiver_private_clients ADD COLUMN ot_multiplier REAL DEFAULT 1.5')
-  await addColumn('created_at', 'ALTER TABLE caregiver_private_clients ADD COLUMN created_at TEXT')
-}
-
-async function _ensureClientSubscriptionsTable(db: any): Promise<void> {
-  await db.prepare("CREATE TABLE IF NOT EXISTS client_subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL, plan TEXT NOT NULL, stripe_customer_id TEXT, stripe_subscription_id TEXT, stripe_session_id TEXT, status TEXT DEFAULT 'active', current_period_end TEXT, contact_unlocks_used INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)").run()
-  const info = await db.prepare('PRAGMA table_info(client_subscriptions)').all()
-  const columns = new Set((info.results || []).map((row: any) => row.name))
-  const addColumn = async (name: string, sql: string) => {
-    if (!columns.has(name)) await db.prepare(sql).run()
-  }
-  await addColumn('stripe_customer_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_customer_id TEXT')
-  await addColumn('stripe_subscription_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_subscription_id TEXT')
-  await addColumn('stripe_session_id', 'ALTER TABLE client_subscriptions ADD COLUMN stripe_session_id TEXT')
-  await addColumn('status', "ALTER TABLE client_subscriptions ADD COLUMN status TEXT DEFAULT 'active'")
-  await addColumn('current_period_end', 'ALTER TABLE client_subscriptions ADD COLUMN current_period_end TEXT')
-  await addColumn('contact_unlocks_used', 'ALTER TABLE client_subscriptions ADD COLUMN contact_unlocks_used INTEGER DEFAULT 0')
-  await addColumn('created_at', 'ALTER TABLE client_subscriptions ADD COLUMN created_at TEXT')
-  await addColumn('updated_at', 'ALTER TABLE client_subscriptions ADD COLUMN updated_at TEXT')
-}
-
-function _stripePeriodEnd(subscription: any): string {
-  const raw = subscription && typeof subscription === 'object' ? subscription.current_period_end : null
-  if (raw) return new Date(Number(raw) * 1000).toISOString()
-  return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()
-}
-
-async function _upsertClientSubscription(db: any, data: {
-  email: string
-  plan: string
-  stripeCustomerId?: string
-  stripeSubscriptionId?: string
-  stripeSessionId?: string
-  currentPeriodEnd?: string
-}): Promise<void> {
-  await _ensureClientSubscriptionsTable(db)
-  const email = data.email.toLowerCase()
-  const existing = data.stripeSessionId || data.stripeSubscriptionId
-    ? await db.prepare(
-        `SELECT id FROM client_subscriptions
-         WHERE (stripe_session_id = ? AND stripe_session_id != '')
-            OR (stripe_subscription_id = ? AND stripe_subscription_id != '')
-         LIMIT 1`
-      ).bind(data.stripeSessionId || '', data.stripeSubscriptionId || '').first()
-    : null
-
-  if (existing?.id) {
-    await db.prepare(
-      `UPDATE client_subscriptions
-       SET email = ?, plan = ?, stripe_customer_id = ?, stripe_subscription_id = ?,
-           stripe_session_id = ?, status = 'active', current_period_end = ?, updated_at = datetime('now')
-       WHERE id = ?`
-    ).bind(
-      email,
-      data.plan,
-      data.stripeCustomerId || '',
-      data.stripeSubscriptionId || '',
-      data.stripeSessionId || '',
-      data.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      existing.id,
-    ).run()
-    return
-  }
-
-  await db.prepare(
-    `UPDATE client_subscriptions
-     SET status = 'replaced', updated_at = datetime('now')
-     WHERE email = ? AND status = 'active'`
-  ).bind(email).run()
-
-  await db.prepare(
-    `INSERT INTO client_subscriptions
-      (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end)
-     VALUES (?, ?, ?, ?, ?, 'active', ?)`
-  ).bind(
-    email,
-    data.plan,
-    data.stripeCustomerId || '',
-    data.stripeSubscriptionId || '',
-    data.stripeSessionId || '',
-    data.currentPeriodEnd || new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-  ).run()
-}
-
-function _activeTimerFromRow(row: any): any | null {
-  if (!row) return null
-  let parsed: any = {}
-  try {
-    parsed = row.timer_json ? JSON.parse(row.timer_json) || {} : {}
-  } catch {
-    parsed = {}
-  }
-  const startTime = parsed.startTime || parsed.start_time || row.start_time || ''
-  if (!startTime) return null
-  return {
-    ...parsed,
-    startTime,
-    clientName: parsed.clientName || parsed.client_name || row.client_name || '',
-    clientEmail: parsed.clientEmail || parsed.client_email || row.client_email || '',
-    hourlyRate: Number(parsed.hourlyRate || parsed.hourly_rate || row.hourly_rate || 0),
-    billingType: parsed.billingType || parsed.billing_type || 'hourly',
-    notes: parsed.notes || '',
-    updatedAt: row.updated_at || parsed.updatedAt || '',
-  }
-}
-
-function _activeTimerStartMs(timer: any): number {
-  const ms = new Date(timer?.startTime || timer?.start_time || 0).getTime()
-  return Number.isFinite(ms) ? ms : 0
-}
-
-function _parseInvoiceItems(value: any): any[] {
-  if (Array.isArray(value)) return value
-  if (!value) return []
-  try {
-    const parsed = JSON.parse(value)
-    return Array.isArray(parsed) ? parsed : []
-  } catch {
-    return []
-  }
-}
-
-function _normalizePersonalInvoice(input: any): any {
-  const items = _parseInvoiceItems(input.items || input.lineItems || input.line_items)
-  const total = Number(input.total ?? input.amount ?? input.subtotal ?? 0)
-  const issueDate = input.issueDate || input.issuedDate || input.issued_date || new Date().toISOString().split('T')[0]
-  return {
-    id: input.id ? String(input.id).replace(/^cloud_/, '') : '',
-    invoiceNumber: input.invoiceNumber || input.invoice_number || '',
-    clientName: input.clientName || input.client_name || '',
-    clientEmail: input.clientEmail || input.client_email || '',
-    items,
-    subtotal: Number(input.subtotal ?? total),
-    total,
-    amount: total,
-    status: input.status || 'draft',
-    issueDate,
-    issuedDate: issueDate,
-    dueDate: input.dueDate || input.due_date || '',
-    notes: input.notes || '',
-    paidAt: input.paidAt || input.paid_at || '',
-    sentAt: input.sentAt || input.sent_at || '',
-    lastSentAt: input.lastSentAt || input.last_sent_at || '',
-    sendCount: Number(input.sendCount ?? input.send_count ?? 0),
-    emailId: input.emailId || input.email_id || '',
-  }
-}
-
-function _personalInvoiceResponse(row: any): any {
-  const invoice = _normalizePersonalInvoice(row)
-  return {
-    id: 'cloud_' + row.id,
-    cloudId: String(row.id),
-    invoiceNumber: invoice.invoiceNumber,
-    clientName: invoice.clientName,
-    clientEmail: invoice.clientEmail,
-    items: invoice.items,
-    lineItems: invoice.items,
-    subtotal: invoice.subtotal,
-    total: invoice.total,
-    amount: invoice.total,
-    status: invoice.status,
-    issueDate: invoice.issueDate,
-    issuedDate: invoice.issueDate,
-    dueDate: invoice.dueDate,
-    notes: invoice.notes,
-    paidAt: invoice.paidAt,
-    sentAt: invoice.sentAt,
-    lastSentAt: invoice.lastSentAt,
-    sendCount: invoice.sendCount,
-    emailId: invoice.emailId,
-    createdAt: row.created_at || '',
-  }
-}
-
-function _htmlEscape(value: any): string {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
-function _money(value: any): string {
-  return `$${Number(value || 0).toFixed(2)}`
-}
-
-function _invoiceEmailHtml(invoice: any, caregiver: any): string {
-  const rows = invoice.items.length ? invoice.items.map((item: any) => `
-    <tr>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">${_htmlEscape(item.description || 'Care services')}</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${Number(item.hours || 0).toFixed(2)}</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${_money(item.rate)}</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#0f172a;font-weight:700;">${_money(item.amount)}</td>
-    </tr>
-  `).join('') : `
-    <tr>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">Care services</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">1.00</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#475569;">${_money(invoice.total)}</td>
-      <td style="padding:12px;border-bottom:1px solid #e2e8f0;text-align:right;color:#0f172a;font-weight:700;">${_money(invoice.total)}</td>
-    </tr>
-  `
-
-  return `
-<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
-<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
-  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 16px;">
-    <tr><td align="center">
-      <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:18px;overflow:hidden;border:1px solid #e2e8f0;">
-        <tr>
-          <td style="background:#0f172a;padding:28px 32px;color:#ffffff;">
-            <h1 style="margin:0;font-size:24px;letter-spacing:0;">Carehia</h1>
-            <p style="margin:8px 0 0;color:#cbd5e1;font-size:14px;">Invoice ${_htmlEscape(invoice.invoiceNumber)}</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:32px;">
-            <p style="margin:0 0 18px;color:#0f172a;font-size:18px;font-weight:700;">Hi ${_htmlEscape(invoice.clientName || 'there')},</p>
-            <p style="margin:0 0 24px;color:#475569;font-size:15px;line-height:1.6;">Your caregiver has sent an invoice for care services. A PDF copy is attached for your records.</p>
-            <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;background:#f8fafc;border-radius:12px;">
-              <tr>
-                <td style="padding:16px;color:#64748b;font-size:13px;">Issued<br><strong style="color:#0f172a;font-size:15px;">${_htmlEscape(invoice.issueDate)}</strong></td>
-                <td style="padding:16px;color:#64748b;font-size:13px;">Due<br><strong style="color:#0f172a;font-size:15px;">${_htmlEscape(invoice.dueDate)}</strong></td>
-                <td style="padding:16px;color:#64748b;font-size:13px;">Total<br><strong style="color:#0f172a;font-size:20px;">${_money(invoice.total)}</strong></td>
-              </tr>
-            </table>
-            <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin-bottom:24px;">
-              <thead>
-                <tr>
-                  <th align="left" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Description</th>
-                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Hours</th>
-                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Rate</th>
-                  <th align="right" style="padding:10px 12px;border-bottom:2px solid #cbd5e1;color:#64748b;font-size:12px;text-transform:uppercase;">Amount</th>
-                </tr>
-              </thead>
-              <tbody>${rows}</tbody>
-            </table>
-            ${invoice.notes ? `<p style="margin:0 0 24px;color:#475569;font-size:14px;"><strong style="color:#0f172a;">Notes:</strong> ${_htmlEscape(invoice.notes)}</p>` : ''}
-            <p style="margin:0;color:#64748b;font-size:13px;line-height:1.5;">Questions? Reply to this email or contact <a href="mailto:support@carehia.com" style="color:#2563eb;">support@carehia.com</a>.</p>
-          </td>
-        </tr>
-        <tr>
-          <td style="background:#f8fafc;padding:18px 32px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:12px;">
-            Sent by ${_htmlEscape(caregiver?.name || caregiver?.email || 'your caregiver')} through Carehia.
-          </td>
-        </tr>
-      </table>
-    </td></tr>
-  </table>
-</body>
-</html>`
-}
-
-function _pdfEscape(value: any): string {
-  return String(value ?? '')
-    .replace(/[^\x20-\x7E]/g, '')
-    .replace(/\\/g, '\\\\')
-    .replace(/\(/g, '\\(')
-    .replace(/\)/g, '\\)')
-}
-
-function _invoicePdfBase64(invoice: any, caregiver: any): string {
-  const lines = [
-    'Carehia Invoice',
-    `Invoice: ${invoice.invoiceNumber}`,
-    `Client: ${invoice.clientName}`,
-    invoice.clientEmail ? `Client email: ${invoice.clientEmail}` : '',
-    `Issued: ${invoice.issueDate}`,
-    `Due: ${invoice.dueDate}`,
-    '',
-    'Items:',
-    ...invoice.items.map((item: any) => `${item.description || 'Care services'} - ${Number(item.hours || 0).toFixed(2)} hrs x ${_money(item.rate)} = ${_money(item.amount)}`),
-    '',
-    `Total due: ${_money(invoice.total)}`,
-    invoice.notes ? `Notes: ${invoice.notes}` : '',
-    '',
-    `Sent by ${caregiver?.name || caregiver?.email || 'Carehia caregiver'}`,
-  ].filter(Boolean).map((line) => _pdfEscape(line).slice(0, 100))
-
-  const stream = [
-    'BT',
-    '/F1 18 Tf',
-    '50 760 Td',
-    `(${lines[0] || 'Carehia Invoice'}) Tj`,
-    '/F1 10 Tf',
-    ...lines.slice(1).flatMap((line) => ['0 -18 Td', `(${line}) Tj`]),
-    'ET',
-  ].join('\n')
-
-  const objects = [
-    '1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n',
-    '2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n',
-    '3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n',
-    `4 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`,
-    '5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n',
-  ]
-  let pdf = '%PDF-1.4\n'
-  const offsets = [0]
-  objects.forEach((obj) => {
-    offsets.push(pdf.length)
-    pdf += obj
-  })
-  const xref = pdf.length
-  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`
-  pdf += offsets.slice(1).map((offset) => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')
-  pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
-  return btoa(pdf)
-}
-
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -2117,13 +1644,17 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
               const clientEmail = session.metadata?.client_email || session.customer_email || ''
               const plan = session.metadata?.plan || 'essential'
               if (clientEmail) {
-                await _upsertClientSubscription(cloudflare.env.D1, {
-                  email: clientEmail,
-                  plan,
-                  stripeCustomerId: session.customer || '',
-                  stripeSubscriptionId: session.subscription || '',
-                  stripeSessionId: session.id,
-                  currentPeriodEnd: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+                await (req as any).payload.db.execute({
+                  sql: 'INSERT INTO client_subscriptions (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                  values: [
+                    clientEmail.toLowerCase(),
+                    plan,
+                    session.customer || '',
+                    session.subscription || '',
+                    session.id,
+                    'active',
+                    new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+                  ],
                 })
               }
             }
@@ -2493,10 +2024,8 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { email, plan, caregiverId } = body
+          const { email, plan } = body
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
-
-          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
 
           const priceMap: Record<string, string> = {
             essential: 'price_1TQhO56E8zcVOY4tJyqfoiwi',
@@ -2507,11 +2036,6 @@ Return a JSON object with these fields:
           if (!priceId) return Response.json({ error: 'Invalid plan' }, { status: 400 })
 
           const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
-          if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
-          const successUrl =
-            `https://app.carehia.com/?subscription=success&session_id={CHECKOUT_SESSION_ID}` +
-            `&plan=${encodeURIComponent(plan)}&email=${encodeURIComponent(email)}`
-          const cancelParams = new URLSearchParams({ subscription: 'cancelled' })
           const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
             method: 'POST',
             headers: {
@@ -2523,12 +2047,11 @@ Return a JSON object with these fields:
               'customer_email': email,
               'line_items[0][price]': priceId,
               'line_items[0][quantity]': '1',
-              'success_url': successUrl,
-              'cancel_url': `https://app.carehia.com/?${cancelParams.toString()}#profile`,
+              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email),
+              'cancel_url': 'https://gotocare-client-portal.pages.dev/?subscription=cancelled',
               'metadata[plan]': plan,
               'metadata[client_email]': email,
               'metadata[type]': 'client_subscription',
-              ...(caregiverId ? { 'metadata[caregiver_id]': String(caregiverId) } : {}),
               'allow_promotion_codes': 'true',
             }).toString(),
           })
@@ -2550,10 +2073,13 @@ Return a JSON object with these fields:
           const email = url.searchParams.get('email')
           if (!email) return Response.json({ subscribed: false, error: 'email required' }, { status: 400 })
 
-          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
-          const sub = await cloudflare.env.D1.prepare(
-            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
-          ).bind(email.toLowerCase(), 'active').first()
+          const db = (req as any).payload?.db?.drizzle || (globalThis as any).D1
+          // Use raw D1 query via the adapter
+          const result = await (req as any).payload.db.execute({
+            sql: 'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
+            values: [email.toLowerCase(), 'active'],
+          })
+          const sub = result?.rows?.[0] || null
           if (!sub) return Response.json({ subscribed: false, plan: null })
           // Check if subscription is still valid
           const now = new Date()
@@ -2579,93 +2105,24 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { email, plan } = body
-          const sessionId = body.sessionId || body.session_id || ''
+          const { email, plan, sessionId } = body
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
 
-          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
-
-          if (sessionId) {
-            const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
-            if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
-            const query = new URLSearchParams({ 'expand[]': 'subscription' })
-            const stripeRes = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}?${query.toString()}`, {
-              headers: { 'Authorization': `Bearer ${stripeKey}` },
-            })
-            const session = await stripeRes.json() as any
-            if (!stripeRes.ok) {
-              return Response.json({ error: session.error?.message || 'Unable to verify Stripe session' }, { status: 400 })
-            }
-            if (session.status !== 'complete' || !['paid', 'no_payment_required'].includes(session.payment_status || '')) {
-              return Response.json({ error: 'Stripe checkout is not complete' }, { status: 402 })
-            }
-            const sessionEmail = String(session.metadata?.client_email || session.customer_details?.email || session.customer_email || '').toLowerCase()
-            const requestedEmail = String(email).toLowerCase()
-            if (!sessionEmail || sessionEmail !== requestedEmail) {
-              return Response.json({ error: 'Stripe session does not match this client' }, { status: 403 })
-            }
-            const sessionPlan = String(session.metadata?.plan || plan)
-            if (sessionPlan !== plan) return Response.json({ error: 'Stripe session does not match this plan' }, { status: 403 })
-            const subscription = session.subscription
-            await _upsertClientSubscription(cloudflare.env.D1, {
-              email: requestedEmail,
-              plan: sessionPlan,
-              stripeCustomerId: session.customer || '',
-              stripeSubscriptionId: typeof subscription === 'string' ? subscription : subscription?.id || '',
-              stripeSessionId: session.id,
-              currentPeriodEnd: _stripePeriodEnd(subscription),
-            })
-            return Response.json({ success: true, plan: sessionPlan })
-          }
-
+          // Check if already recorded (idempotent)
           const existing = await cloudflare.env.D1.prepare(
             'SELECT id FROM client_subscriptions WHERE email = ? AND plan = ? AND status = ?'
           ).bind(email.toLowerCase(), plan, 'active').first()
 
-          if (!existing) await _upsertClientSubscription(cloudflare.env.D1, { email, plan, stripeSessionId: '' })
+          if (!existing) {
+            const periodEnd = new Date()
+            periodEnd.setMonth(periodEnd.getMonth() + 1)
+            await cloudflare.env.D1.prepare(
+              `INSERT INTO client_subscriptions (email, plan, stripe_session_id, status, current_period_end)
+               VALUES (?, ?, ?, 'active', ?)`
+            ).bind(email.toLowerCase(), plan, sessionId || '', periodEnd.toISOString()).run()
+          }
 
           return Response.json({ success: true, plan })
-        } catch (error) {
-          return Response.json({ error: String(error) }, { status: 500 })
-        }
-      },
-    },
-    // ====== CREATE CLIENT BILLING PORTAL ======
-    {
-      path: '/create-client-billing-portal',
-      method: 'post',
-      handler: async (req) => {
-        try {
-          const body = await req.json()
-          const email = String(body.email || '').toLowerCase()
-          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
-
-          await _ensureClientSubscriptionsTable(cloudflare.env.D1)
-          const sub = await cloudflare.env.D1.prepare(
-            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
-          ).bind(email, 'active').first()
-          if (!sub?.stripe_customer_id) {
-            return Response.json({ error: 'No Stripe customer found for this subscription' }, { status: 404 })
-          }
-
-          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
-          if (!stripeKey) return Response.json({ error: 'Stripe is not configured' }, { status: 500 })
-          const stripeRes = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${stripeKey}`,
-              'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: new URLSearchParams({
-              customer: sub.stripe_customer_id,
-              return_url: 'https://app.carehia.com/#profile',
-            }).toString(),
-          })
-          const session = await stripeRes.json() as any
-          if (!stripeRes.ok || !session.url) {
-            return Response.json({ error: session.error?.message || 'Could not open billing portal' }, { status: 500 })
-          }
-          return Response.json({ success: true, url: session.url })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
         }
@@ -2762,12 +2219,10 @@ Return a JSON object with these fields:
         try {
           const url = new URL(req.url)
           const specialty = (url.searchParams.get('specialty') || '').toLowerCase().trim()
-          const knownCaregiverQuery = (url.searchParams.get('q') || url.searchParams.get('search') || '').toLowerCase().trim()
-          const requestedLimit = parseInt(url.searchParams.get('limit') || '50')
-          const limit = knownCaregiverQuery ? Math.max(requestedLimit, 200) : requestedLimit
+          const limit = parseInt(url.searchParams.get('limit') || '50')
           // Query D1 caregiver_accounts — this is where marketplace caregivers self-register
           const { results: rows } = await cloudflare.env.D1.prepare(
-            `SELECT id, name, email, phone, bio, photo_url, zip_code, city, state,
+            `SELECT id, name, bio, photo_url, zip_code, city, state,
                     languages, hourly_rate, skills, certifications, care_types, created_at
              FROM caregiver_accounts
              WHERE email_verified = 1
@@ -2790,15 +2245,7 @@ Return a JSON object with these fields:
             try { if (JSON.parse(cg.care_types || '[]').length > 0) s += 10 } catch {}
             return s
           }
-          const matchesKnownCaregiver = (cg: any) => {
-            if (!knownCaregiverQuery) return true
-            const name = String(cg.name || '').toLowerCase()
-            const email = String(cg.email || '').toLowerCase()
-            return name.includes(knownCaregiverQuery) || email.includes(knownCaregiverQuery)
-          }
-          const filteredRows = (rows || []).filter((cg: any) => (
-            calcProfileCompleteness(cg) >= 70 && matchesKnownCaregiver(cg)
-          ))
+          const filteredRows = (rows || []).filter((cg: any) => calcProfileCompleteness(cg) >= 70)
           const mapped = filteredRows.map((cg: any) => {
             const nameParts = (cg.name || 'Caregiver').trim().split(' ')
             const firstName = nameParts[0] || 'Caregiver'
@@ -2815,21 +2262,12 @@ Return a JSON object with these fields:
             const rate = parseFloat(cg.hourly_rate) || 28
             // Match score based on specialty alignment
             let matchScore = 82 + Math.floor(Math.random() * 10)
-            const lowerName = String(cg.name || '').toLowerCase()
-            const lowerEmail = String(cg.email || '').toLowerCase()
-            if (knownCaregiverQuery) {
-              if (lowerEmail === knownCaregiverQuery || lowerName === knownCaregiverQuery) {
-                matchScore = 99
-              } else if (lowerEmail.includes(knownCaregiverQuery) || lowerName.includes(knownCaregiverQuery)) {
-                matchScore = 94
-              }
-            }
             if (specialty && skills.length > 0) {
               const exact = skills.some((s: string) => s.toLowerCase() === specialty)
               const partial = skills.some((s: string) => s.toLowerCase().includes(specialty.split(' ')[0]))
-              if (exact) matchScore = Math.max(matchScore, 93 + Math.floor(Math.random() * 5))
-              else if (partial) matchScore = Math.max(matchScore, 86 + Math.floor(Math.random() * 6))
-              else if (!knownCaregiverQuery) matchScore = 76 + Math.floor(Math.random() * 8)
+              if (exact) matchScore = 93 + Math.floor(Math.random() * 5)
+              else if (partial) matchScore = 86 + Math.floor(Math.random() * 6)
+              else matchScore = 76 + Math.floor(Math.random() * 8)
             }
             return {
               id: cg.id,
@@ -2927,129 +2365,18 @@ Return a JSON object with these fields:
     },
     // ====== BOOK INTERVIEW ======
     {
-      path: '/interview-slots',
-      method: 'get',
-      handler: async (req) => {
-        try {
-          const url = new URL(req.url)
-          const caregiverId = url.searchParams.get('caregiverId')
-          const date = url.searchParams.get('date')
-          const duration = Math.min(60, Math.max(30, parseInt(url.searchParams.get('duration') || '30')))
-          if (!caregiverId || !date) {
-            return Response.json({ error: 'caregiverId and date required' }, { status: 400 })
-          }
-
-          const normalizeMinutes = (value: string) => {
-            const match = String(value || '').match(/^(\d{1,2}):(\d{2})/)
-            if (!match) return null
-            return parseInt(match[1]) * 60 + parseInt(match[2])
-          }
-          const formatTime = (mins: number) => `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`
-          const labelTime = (mins: number) => {
-            const hour24 = Math.floor(mins / 60)
-            const minute = mins % 60
-            const suffix = hour24 >= 12 ? 'PM' : 'AM'
-            const hour12 = hour24 % 12 || 12
-            return `${hour12}:${String(minute).padStart(2, '0')} ${suffix}`
-          }
-          const parseRange = (value: string) => {
-            const raw = String(value || '').toLowerCase().trim()
-            const bucketMap: Record<string, [number, number]> = {
-              morning: [9 * 60, 11 * 60],
-              afternoon: [12 * 60, 15 * 60],
-              evening: [16 * 60, 19 * 60],
-            }
-            if (bucketMap[raw]) return bucketMap[raw]
-            const parts = String(value || '').split('-')
-            if (parts.length !== 2) return null
-            const start = normalizeMinutes(parts[0])
-            const end = normalizeMinutes(parts[1])
-            return start !== null && end !== null && end > start ? [start, end] as [number, number] : null
-          }
-
-          const existing = await cloudflare.env.D1.prepare(
-            `SELECT preferred_time FROM caregiver_bookings
-             WHERE caregiver_id = ? AND preferred_date = ?
-             AND status IN ('pending', 'accepted', 'hired')`
-          ).bind(String(caregiverId), date).all()
-          const busy = (existing.results || [])
-            .map((row: any) => parseRange(row.preferred_time))
-            .filter(Boolean) as [number, number][]
-
-          const day = new Date(`${date}T12:00:00`).getDay()
-          const businessStart = day === 0 || day === 6 ? 10 * 60 : 9 * 60
-          const businessEnd = day === 0 || day === 6 ? 15 * 60 : 17 * 60
-          const slots = []
-          for (let start = businessStart; start + duration <= businessEnd; start += 30) {
-            const end = start + duration
-            const conflicts = busy.some(([busyStart, busyEnd]) => start < busyEnd && end > busyStart)
-            if (!conflicts) {
-              slots.push({
-                value: `${formatTime(start)}-${formatTime(end)}`,
-                label: `${labelTime(start)} - ${labelTime(end)}`,
-                startTime: formatTime(start),
-                endTime: formatTime(end),
-                durationMinutes: duration,
-              })
-            }
-          }
-          return Response.json({ success: true, slots })
-        } catch (error) {
-          return Response.json({ success: false, slots: [], error: String(error) }, { status: 500 })
-        }
-      },
-    },
-    {
       path: '/book-interview',
       method: 'post',
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes, durationMinutes } = body
+          const { caregiverId, clientEmail, careNeeds, preferredDate, preferredTime, interviewType, notes } = body
           if (!caregiverId || !clientEmail || !preferredDate) {
             return Response.json({ error: 'caregiverId, clientEmail, preferredDate required' }, { status: 400 })
           }
-          const normalizeMinutes = (value: string) => {
-            const match = String(value || '').match(/^(\d{1,2}):(\d{2})/)
-            if (!match) return null
-            return parseInt(match[1]) * 60 + parseInt(match[2])
-          }
-          const parseRange = (value: string) => {
-            const raw = String(value || '').toLowerCase().trim()
-            const bucketMap: Record<string, [number, number]> = {
-              morning: [9 * 60, 11 * 60],
-              afternoon: [12 * 60, 15 * 60],
-              evening: [16 * 60, 19 * 60],
-            }
-            if (bucketMap[raw]) return bucketMap[raw]
-            const parts = String(value || '').split('-')
-            if (parts.length !== 2) return null
-            const start = normalizeMinutes(parts[0])
-            const end = normalizeMinutes(parts[1])
-            return start !== null && end !== null && end > start ? [start, end] as [number, number] : null
-          }
-          const requestedRange = parseRange(preferredTime || '')
-          if (requestedRange) {
-            const existing = await cloudflare.env.D1.prepare(
-              `SELECT preferred_time FROM caregiver_bookings
-               WHERE caregiver_id = ? AND preferred_date = ?
-               AND status IN ('pending', 'accepted', 'hired')`
-            ).bind(String(caregiverId), preferredDate).all()
-            const hasConflict = (existing.results || []).some((row: any) => {
-              const range = parseRange(row.preferred_time)
-              return range ? requestedRange[0] < range[1] && requestedRange[1] > range[0] : false
-            })
-            if (hasConflict) {
-              return Response.json({ error: 'That interview time is no longer available.' }, { status: 409 })
-            }
-          }
-          const details = [
-            notes || '',
-            durationMinutes ? `Interview length: ${durationMinutes} minutes` : '',
-          ].filter(Boolean).join('\n')
           await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_bookings (caregiver_id, client_email, care_needs, preferred_date, preferred_time, interview_type, notes, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-          ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', details, 'pending').run()
+          ).bind(String(caregiverId), clientEmail.toLowerCase(), careNeeds || '', preferredDate, preferredTime || '', interviewType || 'video', notes || '', 'pending').run()
           // Send email nudge to caregiver (fire and forget)
           try {
             const cgRow = await cloudflare.env.D1.prepare(
@@ -3082,7 +2409,9 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const token = url.searchParams.get('token')
+          // SECURITY (RISK-02): Accept Authorization: Bearer header OR ?token= query param
+          const authHdr = req.headers.get('Authorization') || ''
+          const token = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') || url.searchParams.get('token') || ''
           if (!token) return Response.json({ error: 'token required' }, { status: 400 })
           // Resolve token → account_id
           const sess = await cloudflare.env.D1.prepare(
@@ -3575,6 +2904,19 @@ Return a JSON object with these fields:
           const { email } = body
           if (!email) return Response.json({ error: 'email required' }, { status: 400 })
 
+          // SECURITY (RISK-05): Rate-limit — 5 reset requests per IP per 15 min
+          const fpIP = req.headers.get('CF-Connecting-IP') || req.headers.get('X-Forwarded-For') || 'unknown'
+          const fpWindow = Math.floor(Date.now() / 1000) - 900
+          const fpAttempts = await cloudflare.env.D1.prepare(
+            'SELECT COUNT(*) as cnt FROM login_attempts WHERE ip = ? AND endpoint = ? AND attempted_at > ?'
+          ).bind(fpIP, 'forgot-password', fpWindow).first() as any
+          if ((fpAttempts?.cnt || 0) >= 5) {
+            return Response.json({ error: 'Too many requests. Please try again in 15 minutes.' }, { status: 429 })
+          }
+          await cloudflare.env.D1.prepare(
+            'INSERT INTO login_attempts (ip, endpoint, email, attempted_at, success) VALUES (?, ?, ?, ?, 0)'
+          ).bind(fpIP, 'forgot-password', email.toLowerCase(), Math.floor(Date.now() / 1000)).run().catch(() => {})
+
           const account = await cloudflare.env.D1.prepare(
             'SELECT id, name, email FROM caregiver_accounts WHERE email = ? AND email_verified = 1'
           ).bind(email.toLowerCase()).first() as any
@@ -3798,7 +3140,9 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const token = url.searchParams.get('token') || req.headers.get('x-caregiver-token') || ''
+          // SECURITY (RISK-02): Accept Authorization: Bearer, x-caregiver-token, or ?token= query param
+          const bearerHdr = req.headers.get('Authorization') || ''
+          const token = (bearerHdr.startsWith('Bearer ') ? bearerHdr.slice(7) : '') || req.headers.get('x-caregiver-token') || url.searchParams.get('token') || ''
           if (!token) return Response.json({ error: 'token required' }, { status: 401 })
 
           const session = await cloudflare.env.D1.prepare(
@@ -3811,7 +3155,6 @@ Return a JSON object with these fields:
           ).bind(session.account_id).first()
           if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
 
-          await _ensureCaregiverReviewsTable(cloudflare.env.D1)
           const reviewStats = await cloudflare.env.D1.prepare(
             'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1'
           ).bind(session.account_id).first() as any
@@ -4459,10 +3802,15 @@ Return a JSON object with these fields:
           const env = cloudflare.env as any
           const url = new URL(req.url)
           const key = url.searchParams.get('key') || ''
-          const token = url.searchParams.get('token') || ''
+          // SECURITY (RISK-02): Accept Authorization: Bearer header OR ?token= query param
+          const authHeader = req.headers.get('Authorization') || ''
+          const token = (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '') || url.searchParams.get('token') || ''
           if (!key || !token) return Response.json({ error: 'Key and token required' }, { status: 400, headers })
           const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
           if (!sess) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          // SECURITY (RISK-03): verify document belongs to the authenticated caregiver
+          const docOwner = await env.D1.prepare('SELECT id FROM caregiver_documents WHERE r2_key = ? AND caregiver_email = ?').bind(key, sess.email).first()
+          if (!docOwner) return Response.json({ error: 'Forbidden' }, { status: 403, headers })
           const obj = await env.R2.get(key)
           if (!obj) return Response.json({ error: 'File not found' }, { status: 404, headers })
           const contentType = obj.httpMetadata?.contentType || 'application/octet-stream'
@@ -4525,12 +3873,10 @@ Return a JSON object with these fields:
           ).bind(clientEmail).all()
           const caregivers = (bookings.results || []) as any[]
           const liveStatuses = []
-          await _ensureCaregiverActiveTimerTable(env.D1)
           for (const cg of caregivers) {
-            const row = await env.D1.prepare(
-              'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
+            const timer = await env.D1.prepare(
+              'SELECT start_time, client_name, is_running FROM caregiver_active_timer WHERE caregiver_email = ? AND is_running = 1'
             ).bind(cg.caregiver_email).first() as any
-            const timer = _activeTimerFromRow(row)
             liveStatuses.push({
               bookingId: cg.id,
               caregiverId: cg.caregiver_id,
@@ -4538,8 +3884,8 @@ Return a JSON object with these fields:
               caregiverName: cg.caregiver_name,
               careNeeds: cg.care_needs,
               isOnsite: !!timer,
-              startTime: timer ? timer.startTime : null,
-              clientName: timer ? timer.clientName : null,
+              startTime: timer ? timer.start_time : null,
+              clientName: timer ? timer.client_name : null,
             })
           }
           return Response.json({ success: true, statuses: liveStatuses }, { headers })
@@ -4560,10 +3906,9 @@ Return a JSON object with these fields:
           if (!clientToken || !caregiverEmail || !days || !startTime || !endTime) {
             return Response.json({ success: false, error: 'Missing required fields' }, { headers })
           }
-          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
-          const daysStr = _normalizeScheduleDays(days)
+          const daysStr = Array.isArray(days) ? days.join(',') : days
           // Upsert: delete existing then insert
           await env.D1.prepare('DELETE FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(sess.email, caregiverEmail).run()
           await env.D1.prepare(
@@ -4586,7 +3931,6 @@ Return a JSON object with these fields:
           const clientToken = url.searchParams.get('clientToken') || ''
           const caregiverEmail = url.searchParams.get('caregiverEmail') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
-          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           if (caregiverEmail) {
@@ -4630,10 +3974,6 @@ Return a JSON object with these fields:
             care_types TEXT,
             start_date TEXT,
             schedule_notes TEXT,
-            schedule_days TEXT,
-            schedule_start_time TEXT,
-            schedule_end_time TEXT,
-            schedule_is_recurring INTEGER DEFAULT 1,
             client_name TEXT,
             client_signature TEXT,
             client_signed_at TEXT,
@@ -4643,15 +3983,9 @@ Return a JSON object with these fields:
             created_at TEXT DEFAULT (datetime('now'))
           )`).run()
           // Add new columns if missing (v2)
-          for (const col of [
-            "ALTER TABLE hire_agreements ADD COLUMN hours_per_week TEXT DEFAULT ''",
-            "ALTER TABLE hire_agreements ADD COLUMN schedule_days TEXT DEFAULT ''",
-            "ALTER TABLE hire_agreements ADD COLUMN schedule_start_time TEXT DEFAULT ''",
-            "ALTER TABLE hire_agreements ADD COLUMN schedule_end_time TEXT DEFAULT ''",
-            "ALTER TABLE hire_agreements ADD COLUMN schedule_is_recurring INTEGER DEFAULT 1",
-          ]) { try { await env.D1.prepare(col).run() } catch(_) {} }
+          try { await env.D1.prepare("ALTER TABLE hire_agreements ADD COLUMN hours_per_week TEXT DEFAULT ''").run() } catch(_) {}
           const body = await req.json()
-          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, negotiatedRate, hoursPerWeek, scheduleDays, scheduleStartTime, scheduleEndTime, scheduleRecurring } = body
+          const { clientToken, caregiverId, careTypes, startDate, scheduleNotes, negotiatedRate, hoursPerWeek } = body
           if (!clientToken || !caregiverId) {
             return Response.json({ success: false, error: 'Missing required fields' }, { status: 400, headers })
           }
@@ -4666,19 +4000,14 @@ Return a JSON object with these fields:
           const finalRate = negotiatedRate || cg.hourly_rate || 0
           const agreementToken = crypto.randomUUID() + '-' + crypto.randomUUID()
           const now = new Date().toISOString()
-          const daysStr = _normalizeScheduleDays(scheduleDays)
-          const scheduleStart = String(scheduleStartTime || '').trim()
-          const scheduleEnd = String(scheduleEndTime || '').trim()
-          const isRecurring = scheduleRecurring === false ? 0 : 1
           // Insert agreement (no client signature yet - caregiver signs first)
           await env.D1.prepare(
-            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, schedule_days, schedule_start_time, schedule_end_time, schedule_is_recurring, client_name, hours_per_week, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
+            `INSERT INTO hire_agreements (agreement_token, client_email, caregiver_id, caregiver_name, caregiver_photo, caregiver_rate, care_types, start_date, schedule_notes, client_name, hours_per_week, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_caregiver')`
           ).bind(
             agreementToken, sess.email, caregiverId, cg.name, cg.photo_url || null,
             finalRate, JSON.stringify(careTypes || []),
             startDate || null, scheduleNotes || null,
-            daysStr, scheduleStart, scheduleEnd, isRecurring,
             sess.name || sess.email, hoursPerWeek || ''
           ).run()
           // Upsert into client_team
@@ -4812,16 +4141,8 @@ Return a JSON object with these fields:
             "UPDATE hire_agreements SET client_signature = ?, client_signed_at = ?, status = 'active' WHERE agreement_token = ?"
           ).bind(clientSignature, now, agreementToken).run()
           await env.D1.prepare(
-            "UPDATE client_team SET status = 'active', agreement_token = COALESCE(agreement_token, ?), hired_at = COALESCE(hired_at, datetime('now')) WHERE client_email = ? AND caregiver_id = ?"
-          ).bind(agreementToken, sess.email, agreement.caregiver_id).run()
-          const activeTeamRow = await env.D1.prepare(
-            'SELECT caregiver_id FROM client_team WHERE client_email = ? AND caregiver_id = ? AND status = ?'
-          ).bind(sess.email, agreement.caregiver_id, 'active').first()
-          if (!activeTeamRow) {
-            await env.D1.prepare(
-              "INSERT INTO client_team (client_email, caregiver_id, booking_id, status, agreement_token, hired_at) VALUES (?, ?, ?, 'active', ?, datetime('now'))"
-            ).bind(sess.email, agreement.caregiver_id, agreement.booking_id || null, agreementToken).run()
-          }
+            "UPDATE client_team SET status = 'active' WHERE client_email = ? AND caregiver_id = ?"
+          ).bind(sess.email, agreement.caregiver_id).run()
           const cg2 = await env.D1.prepare('SELECT name, email FROM caregiver_accounts WHERE id = ?').bind(agreement.caregiver_id).first() as any
           const careTypesStr = (() => { try { return JSON.parse(agreement.care_types || '[]').join(', ') } catch(e) { return agreement.care_types || '' } })()
           const agreementHtml = `<div style="font-family:sans-serif;max-width:560px;margin:0 auto;padding:32px 24px"><h2 style="color:#7C5CFF;margin-top:0">Hire Agreement - Now Active</h2><p>Your hire agreement is fully signed and active. Here is a copy for your records.</p><div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:12px;padding:20px;margin:20px 0"><p style="margin:4px 0"><strong>Caregiver:</strong> ${agreement.caregiver_name}</p><p style="margin:4px 0"><strong>Client:</strong> ${agreement.client_name}</p><p style="margin:4px 0"><strong>Rate:</strong> $${agreement.caregiver_rate}/hr</p><p style="margin:4px 0"><strong>Hours/week:</strong> ${(agreement as any).hours_per_week || 'As discussed'}</p>${agreement.start_date ? `<p style="margin:4px 0"><strong>Start Date:</strong> ${agreement.start_date}</p>` : ''}${careTypesStr ? `<p style="margin:4px 0"><strong>Care Services:</strong> ${careTypesStr}</p>` : ''}${agreement.schedule_notes ? `<p style="margin:4px 0"><strong>Schedule Notes:</strong> ${agreement.schedule_notes}</p>` : ''}</div><div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:8px;padding:16px;margin:16px 0"><p style="margin:0;color:#166534;font-size:13px">Caregiver signed: ${agreement.caregiver_name} - ${agreement.caregiver_signed_at}</p><p style="margin:8px 0 0 0;color:#166534;font-size:13px">Client signed: ${agreement.client_name} - ${now}</p></div><p style="margin-top:16px"><a href="https://gotocare-original.jjioji.workers.dev/api/hire-agreement?token=${agreementToken}&format=html" style="display:inline-block;background:#22C55E;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600">🖨️ Download / Print Signed Agreement</a></p><p style="margin-top:24px;font-size:13px;color:#888">Questions? <a href="mailto:support@carehia.com">support@carehia.com</a></p></div>`
@@ -4829,8 +4150,6 @@ Return a JSON object with these fields:
           if (cg2?.email) { try { await fetch('https://api.resend.com/emails', { method: 'POST', headers: { 'Authorization': `Bearer ${env.RESEND_API_KEY}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ from: 'Carehia <hello@carehia.com>', to: cg2.email, subject: 'Your Hire Agreement is Now Active - Carehia', html: agreementHtml }) }) } catch(_) {} }
           // Auto-populate care_schedules + caregiver_private_clients from signed hire agreement
           try {
-            await _ensureCareSchedulesTable(env.D1)
-            await _ensureCaregiverPrivateClientsTable(env.D1)
             const schedNotes = agreement.schedule_notes || ''
             const dayNameMap: Record<string,string> = { 'Monday':'Mon','Tuesday':'Tue','Wednesday':'Wed','Thursday':'Thu','Friday':'Fri','Saturday':'Sat','Sunday':'Sun' }
             const dayMatch = schedNotes.match(/Days:\s*([^\n]+)/)
@@ -4838,30 +4157,21 @@ Return a JSON object with these fields:
             const parsedDays = dayMatch ? dayMatch[1].split(',').map((d: string) => dayNameMap[d.trim()] || d.trim()).join(',') : ''
             const parsedStart = hrMatch ? hrMatch[1] : ''
             const parsedEnd = hrMatch ? hrMatch[2] : ''
-            const scheduleDaysFinal = _normalizeScheduleDays(agreement.schedule_days || parsedDays)
-            const scheduleStartFinal = String(agreement.schedule_start_time || parsedStart).trim()
-            const scheduleEndFinal = String(agreement.schedule_end_time || parsedEnd).trim()
-            const scheduleRecurringFinal = Number(agreement.schedule_is_recurring ?? 1) ? 1 : 0
             let careTypesList: string[] = []
             try { careTypesList = JSON.parse(agreement.care_types || '[]') } catch (_) {}
             const careTypeFirst = careTypesList[0] || ''
             const cgEmail2 = cg2?.email || ''
-            if (scheduleDaysFinal && scheduleStartFinal && scheduleEndFinal && cgEmail2) {
+            if (parsedDays && parsedStart && parsedEnd && cgEmail2) {
               const existingSched = await env.D1.prepare('SELECT id FROM care_schedules WHERE client_email = ? AND caregiver_email = ?').bind(agreement.client_email, cgEmail2).first()
               if (!existingSched) {
-                await env.D1.prepare('INSERT INTO care_schedules (client_email, caregiver_email, days, start_time, end_time, care_type, notes, is_recurring) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(agreement.client_email, cgEmail2, scheduleDaysFinal, scheduleStartFinal, scheduleEndFinal, careTypeFirst, schedNotes, scheduleRecurringFinal).run()
-              } else {
-                await env.D1.prepare('UPDATE care_schedules SET days = ?, start_time = ?, end_time = ?, care_type = ?, notes = ?, is_recurring = ? WHERE id = ?').bind(scheduleDaysFinal, scheduleStartFinal, scheduleEndFinal, careTypeFirst, schedNotes, scheduleRecurringFinal, (existingSched as any).id).run()
+                await env.D1.prepare('INSERT INTO care_schedules (client_email, caregiver_email, days, start_time, end_time, care_type, notes, is_recurring) VALUES (?, ?, ?, ?, ?, ?, ?, 1)').bind(agreement.client_email, cgEmail2, parsedDays, parsedStart, parsedEnd, careTypeFirst, schedNotes).run()
               }
             }
             if (cgEmail2 && agreement.client_email) {
               const existingPc = await env.D1.prepare('SELECT id FROM caregiver_private_clients WHERE caregiver_email = ? AND email = ?').bind(cgEmail2, agreement.client_email).first()
-              const caregiverClientName = agreement.client_name || sess.name || agreement.client_email.split('@')[0]
-              const cgRate2 = parseFloat(String(agreement.caregiver_rate)) || 25
               if (!existingPc) {
-                await env.D1.prepare("INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, 'hourly', 8, 1.5)").bind(cgEmail2, caregiverClientName, agreement.client_email, '', cgRate2, careTypeFirst).run()
-              } else {
-                await env.D1.prepare("UPDATE caregiver_private_clients SET name = COALESCE(NULLIF(name, ''), ?), hourly_rate = ?, care_type = COALESCE(NULLIF(care_type, ''), ?), billing_type = COALESCE(NULLIF(billing_type, ''), 'hourly') WHERE caregiver_email = ? AND email = ?").bind(caregiverClientName, cgRate2, careTypeFirst, cgEmail2, agreement.client_email).run()
+                const cgRate2 = parseFloat(String(agreement.caregiver_rate)) || 25
+                await env.D1.prepare("INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type) VALUES (?, ?, ?, ?, ?, ?, 'hourly')").bind(cgEmail2, agreement.client_name || agreement.client_email.split('@')[0], agreement.client_email, '', cgRate2, careTypeFirst).run()
               }
             }
           } catch (_autoErr: any) { /* non-blocking — don't fail the agreement */ }
@@ -5090,12 +4400,11 @@ Return a JSON object with these fields:
             "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!timerSession) return Response.json({ timer: null }, { headers })
-          await _ensureCaregiverActiveTimerTable(cloudflare.env.D1)
           const row = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
           ).bind(timerSession.email).first() as any
           if (!row) return Response.json({ timer: null }, { headers })
-          return Response.json({ timer: _activeTimerFromRow(row) }, { headers })
+          return Response.json({ timer: JSON.parse(row.timer_json || 'null') }, { headers })
         } catch (error) {
           return Response.json({ timer: null }, { headers })
         }
@@ -5110,39 +4419,16 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, timer } = body
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const timerSession = await cloudflare.env.D1.prepare(
-            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          const session = await cloudflare.env.D1.prepare(
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!timerSession) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          const timerColumns = await _ensureCaregiverActiveTimerTable(cloudflare.env.D1)
+          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           if (timer === null) {
             await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerSession.email).run()
           } else {
-            const normalizedTimer = {
-              ...timer,
-              startTime: timer.startTime || timer.start_time || new Date().toISOString(),
-              clientName: timer.clientName || timer.client_name || '',
-            }
-            const fields = ['caregiver_email', 'timer_json', 'updated_at']
-            const placeholders = ['?', '?', 'CURRENT_TIMESTAMP']
-            const values: any[] = [timerSession.email, JSON.stringify(normalizedTimer)]
-            if (timerColumns.has('start_time')) {
-              fields.push('start_time')
-              placeholders.push('?')
-              values.push(normalizedTimer.startTime)
-            }
-            if (timerColumns.has('client_name')) {
-              fields.push('client_name')
-              placeholders.push('?')
-              values.push(normalizedTimer.clientName)
-            }
-            if (timerColumns.has('is_running')) {
-              fields.push('is_running')
-              placeholders.push('1')
-            }
             await cloudflare.env.D1.prepare(
-              `INSERT OR REPLACE INTO caregiver_active_timer (${fields.join(', ')}) VALUES (${placeholders.join(', ')})`
-            ).bind(...values).run()
+              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
+            ).bind(timerSession.email, JSON.stringify(timer)).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
@@ -5165,11 +4451,21 @@ Return a JSON object with these fields:
             "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
           const result = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_personal_invoices WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 100'
           ).bind(session.account_id).all()
-          const invoices = (result.results || []).map(_personalInvoiceResponse)
+          const invoices = (result.results || []).map((inv: any) => ({
+            id: 'cloud_' + inv.id,
+            cloudId: String(inv.id),
+            invoiceNumber: inv.invoice_number,
+            clientName: inv.client_name,
+            amount: inv.amount,
+            status: inv.status,
+            issuedDate: inv.issued_date,
+            dueDate: inv.due_date,
+            lineItems: inv.line_items ? (() => { try { return JSON.parse(inv.line_items) } catch { return [] } })() : [],
+            notes: inv.notes || '',
+          }))
           return Response.json({ success: true, invoices }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -5189,22 +4485,12 @@ Return a JSON object with these fields:
             "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
 
           // UPDATE STATUS (replaces PATCH)
           if (cloudId && updates) {
-            const normalized = _normalizePersonalInvoice(updates)
             const fields: string[] = []
             const vals: any[] = []
             if (updates.status !== undefined) { fields.push('status = ?'); vals.push(updates.status) }
-            if (updates.clientName !== undefined) { fields.push('client_name = ?'); vals.push(normalized.clientName) }
-            if (updates.clientEmail !== undefined) { fields.push('client_email = ?'); vals.push(normalized.clientEmail) }
-            if (updates.items !== undefined || updates.lineItems !== undefined) { fields.push('line_items = ?'); vals.push(JSON.stringify(normalized.items)) }
-            if (updates.total !== undefined || updates.amount !== undefined || updates.subtotal !== undefined) { fields.push('amount = ?'); vals.push(normalized.total) }
-            if (updates.issueDate !== undefined || updates.issuedDate !== undefined) { fields.push('issued_date = ?'); vals.push(normalized.issueDate) }
-            if (updates.dueDate !== undefined) { fields.push('due_date = ?'); vals.push(normalized.dueDate) }
-            if (updates.notes !== undefined) { fields.push('notes = ?'); vals.push(normalized.notes) }
-            if (updates.paidAt !== undefined || updates.paid_at !== undefined) { fields.push('paid_at = ?'); vals.push(normalized.paidAt) }
             if (fields.length === 0) return Response.json({ success: true }, { headers })
             vals.push(Number(cloudId), session.account_id)
             await cloudflare.env.D1.prepare(
@@ -5215,17 +4501,16 @@ Return a JSON object with these fields:
 
           // CREATE NEW INVOICE
           if (!invoice) return Response.json({ success: false, error: 'invoice required' }, { status: 400, headers })
-          const normalized = _normalizePersonalInvoice(invoice)
           const r = await cloudflare.env.D1.prepare(
             `INSERT INTO caregiver_personal_invoices
-             (caregiver_id, invoice_number, client_name, client_email, amount, status, issued_date, due_date, line_items, notes)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             (caregiver_id, invoice_number, client_name, amount, status, issued_date, due_date, line_items, notes)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
           ).bind(
             session.account_id,
-            normalized.invoiceNumber, normalized.clientName, normalized.clientEmail,
-            normalized.total, normalized.status,
-            normalized.issueDate, normalized.dueDate,
-            JSON.stringify(normalized.items), normalized.notes
+            invoice.invoiceNumber || '', invoice.clientName || '',
+            invoice.amount || 0, invoice.status || 'draft',
+            invoice.issuedDate || '', invoice.dueDate || '',
+            JSON.stringify(invoice.lineItems || []), invoice.notes || ''
           ).run() as any
           return Response.json({ success: true, cloudId: String(r.meta?.last_row_id || r.lastRowId || '') }, { headers })
         } catch (error) {
@@ -5256,99 +4541,6 @@ Return a JSON object with these fields:
         }
       },
     },
-    {
-      path: '/caregiver-invoice-send',
-      method: 'post',
-      handler: async (req: any) => {
-        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
-        try {
-          const body = await req.json()
-          const token = body.token || ''
-          const cloudId = String(body.cloudId || body.invoiceId || '').replace(/^cloud_/, '')
-          if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT cs.account_id, ca.email, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
-          ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-
-          await _ensurePersonalInvoiceSendColumns(cloudflare.env.D1)
-
-          let row: any = null
-          if (cloudId && Number.isFinite(Number(cloudId))) {
-            row = await cloudflare.env.D1.prepare(
-              'SELECT * FROM caregiver_personal_invoices WHERE id = ? AND caregiver_id = ?'
-            ).bind(Number(cloudId), session.account_id).first() as any
-          }
-
-          const invoice = _normalizePersonalInvoice(row || body.invoice || {})
-          if (!invoice.invoiceNumber) invoice.invoiceNumber = `INV-${Date.now().toString(36).toUpperCase()}`
-          if (!invoice.clientName) return Response.json({ success: false, error: 'clientName required' }, { status: 400, headers })
-          if (!invoice.clientEmail) return Response.json({ success: false, error: 'clientEmail required' }, { status: 400, headers })
-          if (!invoice.total || invoice.total <= 0) return Response.json({ success: false, error: 'Invoice total must be greater than zero' }, { status: 400, headers })
-
-          const resendKey = cloudflare.env.RESEND_API_KEY
-          if (!resendKey) return Response.json({ success: false, error: 'RESEND_API_KEY not configured' }, { status: 500, headers })
-
-          const emailRes = await fetch('https://api.resend.com/emails', {
-            method: 'POST',
-            headers: {
-              'Authorization': `Bearer ${resendKey}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              from: 'Carehia <support@carehia.com>',
-              to: [invoice.clientEmail],
-              reply_to: 'support@carehia.com',
-              subject: `Invoice ${invoice.invoiceNumber} from Carehia`,
-              html: _invoiceEmailHtml(invoice, session),
-              attachments: [
-                {
-                  filename: `${invoice.invoiceNumber || 'invoice'}.pdf`,
-                  content: _invoicePdfBase64(invoice, session),
-                },
-              ],
-            }),
-          })
-
-          const emailData = await emailRes.json() as any
-          if (!emailRes.ok) {
-            return Response.json({ success: false, error: emailData.message || 'Email send failed' }, { status: 500, headers })
-          }
-
-          const sentAt = new Date().toISOString()
-          let updatedInvoice = {
-            ...invoice,
-            status: 'sent',
-            sentAt: invoice.sentAt || sentAt,
-            lastSentAt: sentAt,
-            sendCount: (invoice.sendCount || 0) + 1,
-            emailId: emailData.id || '',
-          }
-
-          if (row?.id) {
-            await cloudflare.env.D1.prepare(
-              `UPDATE caregiver_personal_invoices
-               SET status = 'sent',
-                   client_email = ?,
-                   sent_at = COALESCE(sent_at, ?),
-                   last_sent_at = ?,
-                   send_count = COALESCE(send_count, 0) + 1,
-                   email_id = ?
-               WHERE id = ? AND caregiver_id = ?`
-            ).bind(invoice.clientEmail, sentAt, sentAt, emailData.id || '', row.id, session.account_id).run()
-            const saved = await cloudflare.env.D1.prepare(
-              'SELECT * FROM caregiver_personal_invoices WHERE id = ? AND caregiver_id = ?'
-            ).bind(row.id, session.account_id).first() as any
-            updatedInvoice = _personalInvoiceResponse(saved)
-          }
-
-          return Response.json({ success: true, emailId: emailData.id, invoice: updatedInvoice }, { headers })
-        } catch (error) {
-          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
-        }
-      },
-    },
 
     // ====== PRIVATE CLIENTS ======
     {
@@ -5364,7 +4556,6 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           const result = await cloudflare.env.D1.prepare(
             'SELECT * FROM caregiver_private_clients WHERE caregiver_email = ? ORDER BY name ASC'
           ).bind(session.caregiver_email).all()
@@ -5399,7 +4590,6 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           const r = await cloudflare.env.D1.prepare(
             'INSERT INTO caregiver_private_clients (caregiver_email, name, email, phone, hourly_rate, care_type, billing_type, ot_after_hrs, ot_multiplier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
           ).bind(
@@ -5427,7 +4617,6 @@ Return a JSON object with these fields:
             "SELECT cs.account_id, ca.email AS caregiver_email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
-          await _ensureCaregiverPrivateClientsTable(cloudflare.env.D1)
           await cloudflare.env.D1.prepare(
             'DELETE FROM caregiver_private_clients WHERE id = ? AND caregiver_email = ?'
           ).bind(Number(cloudId), session.caregiver_email).run()
@@ -5861,10 +5050,6 @@ Return a JSON object with these fields:
             'SELECT id, name, bio, photo_url, zip_code, city, state, care_types, skills, certifications, hourly_rate, created_at FROM caregiver_accounts WHERE id = ?'
           ).bind(parseInt(id)).first()
           if (!result) return Response.json({ success: false, error: 'Profile not found' }, { status: 404, headers })
-          await _ensureCaregiverReviewsTable(db)
-          const reviewStats = await db.prepare(
-            'SELECT AVG(rating) as avg_rating, COUNT(*) as review_count FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1'
-          ).bind(parseInt(id)).first() as any
           let skills = []
           let certifications = []
           try { skills = JSON.parse((result as any).skills || '[]') } catch {}
@@ -5879,7 +5064,7 @@ Return a JSON object with these fields:
             trustScore: trustRow?.score || 0,
             trustLevel: trustRow?.level || 'Basic',
           }
-          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, badges, rating: reviewStats?.avg_rating ? Math.round(reviewStats.avg_rating * 10) / 10 : null, total_reviews: reviewStats?.review_count || 0 } }, { headers })
+          return Response.json({ success: true, profile: { ...(result as any), skills, certifications, badges } }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -5944,7 +5129,6 @@ Return a JSON object with these fields:
           const session = await db.prepare('SELECT caregiver_id FROM caregiver_sessions WHERE token = ?').bind(token).first()
           if (!session) return Response.json({ success: false, error: 'Invalid token' }, { status: 401, headers })
           const cgId = (session as any).caregiver_id
-          await _ensureCaregiverReviewsTable(db)
           const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
           const idVerif = await db.prepare('SELECT status, doc_type, submitted_at FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY id DESC LIMIT 1').bind(cgId).first()
           const bgCheck = await db.prepare('SELECT status, initiated_at, completed_at, expires_at FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
@@ -5988,7 +5172,6 @@ Return a JSON object with these fields:
           if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
           const cgId = parseInt(id)
-          await _ensureCaregiverReviewsTable(db)
           const idVerif = await db.prepare('SELECT status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN (?) ORDER BY id DESC LIMIT 1').bind(cgId, 'drivers_license,state_id,passport').first()
           const bgCheck = await db.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(cgId).first()
           const certRows = await db.prepare("SELECT doc_type as name, status FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type IN ('cpr','cna','hha')").bind(cgId).all()
@@ -6115,64 +5298,10 @@ Return a JSON object with these fields:
           const id = url.searchParams.get('id')
           if (!id) return Response.json({ success: false, error: 'id required' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          await _ensureCaregiverReviewsTable(db)
-          const rows = await db.prepare('SELECT id, rating, review_text, client_name, is_repeat_client, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
+          const rows = await db.prepare('SELECT rating, review_text, is_repeat_client, is_punctual, is_caring, is_professional, would_hire_again, created_at FROM caregiver_reviews WHERE caregiver_id = ? AND is_visible = 1 ORDER BY created_at DESC LIMIT 20').bind(parseInt(id)).all()
           const reviews = rows.results || []
           const avg = reviews.length > 0 ? (reviews as any[]).reduce((s, r) => s + (r as any).rating, 0) / reviews.length : 0
           return Response.json({ success: true, reviews, avgRating: Math.round(avg*10)/10, reviewCount: reviews.length }, { headers })
-        } catch (error) {
-          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
-        }
-      },
-    },
-
-    // ====== RANDOM PUBLIC REVIEW CARDS (landing page carousel) ======
-    {
-      path: '/caregiver-review-cards',
-      method: 'get',
-      handler: async (req: any) => {
-        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
-        try {
-          const url = new URL(req.url)
-          const limit = Math.min(12, Math.max(3, parseInt(url.searchParams.get('limit') || '6')))
-          const db = (cloudflare as any).env.D1
-          await _ensureCaregiverReviewsTable(db)
-          const rows = await db.prepare(`
-            SELECT
-              r.id,
-              r.caregiver_id,
-              r.rating,
-              r.review_text,
-              r.created_at,
-              ca.name as caregiver_name,
-              ca.photo_url as caregiver_photo,
-              ca.city,
-              ca.state,
-              ca.skills
-            FROM caregiver_reviews r
-            JOIN caregiver_accounts ca ON ca.id = r.caregiver_id
-            WHERE r.is_visible = 1
-              AND r.rating >= 4
-              AND TRIM(COALESCE(r.review_text, '')) <> ''
-            ORDER BY RANDOM()
-            LIMIT ?
-          `).bind(limit).all()
-          const reviews = (rows.results || []).map((row: any) => {
-            let skills: string[] = []
-            try { skills = JSON.parse(row.skills || '[]') } catch {}
-            return {
-              id: row.id,
-              caregiverId: row.caregiver_id,
-              caregiverName: row.caregiver_name || 'Carehia caregiver',
-              caregiverPhoto: row.caregiver_photo || '',
-              location: [row.city, row.state].filter(Boolean).join(', '),
-              rating: row.rating,
-              reviewText: row.review_text,
-              skill: skills[0] || 'Caregiver',
-              createdAt: row.created_at,
-            }
-          })
-          return Response.json({ success: true, reviews }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -6188,31 +5317,19 @@ Return a JSON object with these fields:
         try {
           const body = await req.json()
           const { clientToken, caregiverId, bookingId, rating, reviewText, isPunctual, isCaring, isCommunicative, isProfessional, wouldHireAgain } = body
-          const cgId = parseInt(String(caregiverId || ''), 10)
-          const safeRating = parseInt(String(rating || ''), 10)
-          if (!cgId || !safeRating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
-          if (safeRating < 1 || safeRating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
+          if (!caregiverId || !rating) return Response.json({ success: false, error: 'caregiverId and rating required' }, { status: 400, headers })
+          if (rating < 1 || rating > 5) return Response.json({ success: false, error: 'rating must be 1-5' }, { status: 400, headers })
           const db = (cloudflare as any).env.D1
-          await _ensureCaregiverReviewsTable(db)
-          const caregiver = await db.prepare('SELECT id FROM caregiver_accounts WHERE id = ?').bind(cgId).first()
-          if (!caregiver) return Response.json({ success: false, error: 'Caregiver not found' }, { status: 404, headers })
-          let clientEmail = String(body.clientEmail || '').trim().toLowerCase()
-          let clientName = String(body.clientName || '').trim()
+          let clientEmail = body.clientEmail || 'anonymous'
           if (clientToken) {
-            const sess = await db.prepare("SELECT cs.email, ca.name FROM client_sessions cs LEFT JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime('now')").bind(clientToken).first()
-            if (sess) {
-              clientEmail = (sess as any).email || clientEmail
-              clientName = (sess as any).name || clientName
-            }
+            const sess = await db.prepare('SELECT email FROM client_sessions WHERE session_token = ?').bind(clientToken).first()
+            if (sess) clientEmail = (sess as any).email
           }
-          if (!clientEmail) clientEmail = 'anonymous'
-          const prior = clientEmail === 'anonymous'
-            ? null
-            : await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(cgId), clientEmail).first()
+          const prior = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND client_email = ? AND status = 'accepted'").bind(String(caregiverId), clientEmail).first()
           const isRepeat = ((prior as any)?.cnt || 0) > 1 ? 1 : 0
-          await db.prepare("INSERT INTO caregiver_reviews (caregiver_id, client_email, client_name, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))").bind(cgId, clientEmail, clientName || null, bookingId||null, safeRating, String(reviewText || '').trim().slice(0, 1000), isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
+          await db.prepare('INSERT INTO caregiver_reviews (caregiver_id, client_email, booking_id, rating, review_text, is_punctual, is_caring, is_communicative, is_professional, would_hire_again, is_repeat_client, is_visible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)').bind(parseInt(caregiverId), clientEmail, bookingId||null, rating, reviewText||'', isPunctual?1:0, isCaring?1:0, isCommunicative?1:0, isProfessional?1:0, wouldHireAgain?1:0, isRepeat).run()
           if (isRepeat) {
-            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(cgId).run()
+            await db.prepare("INSERT INTO caregiver_response_metrics (caregiver_id, repeat_bookings, total_requests, accepted, completed_shifts, avg_response_minutes) VALUES (?, 1, 0, 0, 0, 0) ON CONFLICT(caregiver_id) DO UPDATE SET repeat_bookings = repeat_bookings + 1, updated_at = datetime('now')").bind(parseInt(caregiverId)).run()
           }
           return Response.json({ success: true, message: 'Review submitted. Thank you!' }, { headers })
         } catch (error) {
@@ -6609,35 +5726,25 @@ Return a JSON object with these fields:
           // Find any caregiver on team who has an active timer running
           // caregiver_active_timer uses caregiver_email — join via caregiver_accounts
           const ph = caregiverIds.map(() => '?').join(',')
-          await _ensureCaregiverActiveTimerTable(db)
-          const timerRows = await db.prepare(
-            `SELECT cat.*, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
+          const timerRow = await db.prepare(
+            `SELECT cat.start_time, cat.client_name, ca.name as caregiver_name, ca.photo_url, ca.id as caregiver_id
              FROM caregiver_active_timer cat
              JOIN caregiver_accounts ca ON ca.email = cat.caregiver_email
              WHERE ca.id IN (${ph})
-             ORDER BY cat.updated_at DESC`
-          ).bind(...caregiverIds).all() as any
-          const activeRows = ((timerRows.results || []) as any[])
-            .map((row: any) => ({ row, timer: _activeTimerFromRow(row) }))
-            .filter((item: any) => !!item.timer)
-            .filter((item: any) => {
-              const timerClientEmail = String(item.timer.clientEmail || '').toLowerCase()
-              return !timerClientEmail || timerClientEmail === clientEmail.toLowerCase()
-            })
-            .sort((a: any, b: any) => _activeTimerStartMs(b.timer) - _activeTimerStartMs(a.timer))
-          const active = activeRows[0]
+             ORDER BY cat.start_time DESC LIMIT 1`
+          ).bind(...caregiverIds).first() as any
 
-          if (!active) {
+          if (!timerRow) {
             return Response.json({ active: false, message: 'No caregiver currently onsite' }, { headers })
           }
 
           return Response.json({
             active: true,
-            caregiver_name: active.row.caregiver_name || 'Caregiver',
-            caregiver_id: active.row.caregiver_id,
-            photo_url: active.row.photo_url || null,
-            start_time: active.timer.startTime,
-            client_name: active.timer.clientName || '',
+            caregiver_name: timerRow.caregiver_name || 'Caregiver',
+            caregiver_id: timerRow.caregiver_id,
+            photo_url: timerRow.photo_url || null,
+            start_time: timerRow.start_time,
+            client_name: timerRow.client_name || '',
           }, { headers })
         } catch (error) {
           return Response.json({ active: false, error: String(error) }, { status: 500, headers })
@@ -7023,7 +6130,6 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
-          await _ensureCareSchedulesTable(env.D1)
           const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
           const cgAcc = await env.D1.prepare('SELECT email, name FROM caregiver_accounts WHERE id = ?').bind(sess.account_id).first() as any
