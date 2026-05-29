@@ -2074,6 +2074,7 @@ Return a JSON object with these fields:
         try {
           const body = await req.json()
           const { email, plan } = body
+          const caregiverId = (body as any).caregiverId || null
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
 
           const priceMap: Record<string, string> = {
@@ -2096,7 +2097,7 @@ Return a JSON object with these fields:
               'customer_email': email,
               'line_items[0][price]': priceId,
               'line_items[0][quantity]': '1',
-              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email),
+              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email) + (caregiverId ? '&caregiver_return=' + encodeURIComponent(String(caregiverId)) : ''),
               'cancel_url': 'https://gotocare-client-portal.pages.dev/?subscription=cancelled',
               'metadata[plan]': plan,
               'metadata[client_email]': email,
@@ -3062,9 +3063,14 @@ Return a JSON object with these fields:
 
           if (!resetRecord) return Response.json({ error: 'This reset link is invalid or has expired. Please request a new one.' }, { status: 400 })
 
-          // Hash the new password the same way as registration
+          // Fetch the stored salt so hash matches login (SHA-256(password + salt))
+          const accountForReset = await cloudflare.env.D1.prepare(
+            'SELECT salt FROM caregiver_accounts WHERE email = ?'
+          ).bind(resetRecord.email).first() as any
+          if (!accountForReset) return Response.json({ error: 'Account not found.' }, { status: 400 })
+
           const encoder = new TextEncoder()
-          const data = encoder.encode(new_password + resetRecord.email)
+          const data = encoder.encode(new_password + accountForReset.salt)
           const hashBuffer = await crypto.subtle.digest('SHA-256', data)
           const hashArray = Array.from(new Uint8Array(hashBuffer))
           const passwordHash = hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
