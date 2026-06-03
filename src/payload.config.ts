@@ -173,6 +173,23 @@ async function _requireClientAuthFromBody(req: any, body: any): Promise<{ email:
   return { email: row.email }
 }
 
+async function _ensureCaregiverRequestHideColumns(db: any): Promise<void> {
+  const statements = [
+    'ALTER TABLE caregiver_bookings ADD COLUMN caregiver_hidden INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_bookings ADD COLUMN caregiver_hidden_at TEXT',
+    'ALTER TABLE caregiver_bookings ADD COLUMN caregiver_hidden_reason TEXT',
+    'ALTER TABLE hire_agreements ADD COLUMN caregiver_hidden INTEGER DEFAULT 0',
+    'ALTER TABLE hire_agreements ADD COLUMN caregiver_hidden_at TEXT',
+    'ALTER TABLE hire_agreements ADD COLUMN caregiver_hidden_reason TEXT',
+  ]
+  for (const statement of statements) {
+    try { await db.prepare(statement).run() } catch (_) {}
+  }
+}
+
+const _HIDEABLE_HIRE_OFFER_STATUSES = new Set(['declined', 'expired', 'cancelled', 'rejected'])
+const _HIDEABLE_INTERVIEW_STATUSES = new Set(['completed', 'cancelled', 'declined', 'expired', 'no_show'])
+
 export default buildConfig({
   admin: {
     user: Users.slug,
@@ -2477,13 +2494,15 @@ Return a JSON object with these fields:
           ).bind(token).first() as any
           if (!sess) return Response.json({ error: 'Invalid or expired token' }, { status: 401 })
           const caregiverId = sess.account_id
+          await _ensureCaregiverRequestHideColumns(cloudflare.env.D1)
           // Fetch bookings, JOIN client_accounts for real contact info when unlocked
           const result = await cloudflare.env.D1.prepare(
             `SELECT cb.*,
               CASE WHEN cb.is_unlocked = 1 THEN ca.name ELSE NULL END as client_name
              FROM caregiver_bookings cb
              LEFT JOIN client_accounts ca ON ca.email = cb.client_email
-             WHERE cb.caregiver_id = ? ORDER BY cb.created_at DESC LIMIT 50`
+             WHERE cb.caregiver_id = ? AND COALESCE(cb.caregiver_hidden, 0) = 0
+             ORDER BY cb.created_at DESC LIMIT 50`
           ).bind(String(caregiverId)).all()
           const bookings = (result.results || []).map((b: any) => ({
             id: b.id,
@@ -2670,6 +2689,56 @@ Return a JSON object with these fields:
           return Response.json({ success: true, bookingId, status })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
+    // ====== HIDE CAREGIVER REQUEST ITEM (soft delete from caregiver view only) ======
+    {
+      path: '/caregiver-requests/hide',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const cgSess = await _requireCgAuth(req)
+          if (!cgSess) return Response.json({ success: false, error: 'Caregiver authentication required' }, { status: 401, headers })
+
+          const body = await req.json()
+          const { itemId, itemType, reason } = body || {}
+          if (!itemId || !['hire_offer', 'interview'].includes(itemType)) {
+            return Response.json({ success: false, error: 'itemId and valid itemType required' }, { status: 400, headers })
+          }
+
+          const db = (cloudflare.env as any).D1
+          await _ensureCaregiverRequestHideColumns(db)
+          const hideReason = String(reason || 'user_removed').slice(0, 80)
+
+          if (itemType === 'interview') {
+            const booking = await db.prepare(
+              'SELECT id, status FROM caregiver_bookings WHERE id = ? AND caregiver_id = ?'
+            ).bind(Number(itemId), cgSess.account_id).first() as any
+            if (!booking) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
+            if (!_HIDEABLE_INTERVIEW_STATUSES.has(String(booking.status || '').toLowerCase())) {
+              return Response.json({ success: false, error: 'This interview cannot be removed from your view yet.' }, { status: 409, headers })
+            }
+            await db.prepare(
+              "UPDATE caregiver_bookings SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
+            ).bind(hideReason, Number(itemId), cgSess.account_id).run()
+            return Response.json({ success: true, itemId, itemType }, { headers })
+          }
+
+          const agreement = await db.prepare(
+            'SELECT id, status FROM hire_agreements WHERE id = ? AND caregiver_id = ?'
+          ).bind(Number(itemId), cgSess.account_id).first() as any
+          if (!agreement) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
+          if (!_HIDEABLE_HIRE_OFFER_STATUSES.has(String(agreement.status || '').toLowerCase())) {
+            return Response.json({ success: false, error: 'This hire offer cannot be removed from your view yet.' }, { status: 409, headers })
+          }
+          await db.prepare(
+            "UPDATE hire_agreements SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
+          ).bind(hideReason, Number(itemId), cgSess.account_id).run()
+          return Response.json({ success: true, itemId, itemType }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
       },
     },
@@ -4326,8 +4395,9 @@ Return a JSON object with these fields:
             "SELECT ca.id, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON cs.account_id = ca.id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
+          await _ensureCaregiverRequestHideColumns(env.D1)
           const result = await env.D1.prepare(
-            "SELECT * FROM hire_agreements WHERE caregiver_id = ? AND status IN ('pending_caregiver', 'active', 'declined') ORDER BY created_at DESC LIMIT 20"
+            "SELECT * FROM hire_agreements WHERE caregiver_id = ? AND status IN ('pending_caregiver', 'active', 'declined', 'expired', 'cancelled', 'rejected') AND COALESCE(caregiver_hidden, 0) = 0 ORDER BY created_at DESC LIMIT 20"
           ).bind(sess.id).all()
           return Response.json({ success: true, offers: result.results || [] }, { headers })
         } catch (e: any) {
