@@ -173,8 +173,25 @@ async function _requireClientAuthFromBody(req: any, body: any): Promise<{ email:
   return { email: row.email }
 }
 
+/** Validate platform admin session. Returns { email, name } or null. */
+async function _requireAdminAuth(req: any): Promise<{ email: string; name: string } | null> {
+  const url = new URL(req.url)
+  const authHdr = req.headers?.get('Authorization') || ''
+  const token = (authHdr.startsWith('Bearer ') ? authHdr.slice(7) : '') ||
+    req.headers?.get('x-session-token') || url.searchParams.get('adminToken') || url.searchParams.get('token') || ''
+  if (!token) return null
+  const row = await (cloudflare.env as any).D1.prepare(
+    'SELECT ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? AND cs.expires_at > datetime(\'now\') AND ca.is_admin = 1 LIMIT 1'
+  ).bind(token).first() as any
+  if (!row) return null
+  return { email: row.email, name: row.name || row.email }
+}
+
 const _HIDEABLE_INTERVIEW_STATUSES = new Set(['completed', 'cancelled', 'declined', 'expired', 'no_show'])
 const _HIDEABLE_HIRE_OFFER_STATUSES = new Set(['declined', 'expired', 'cancelled', 'rejected', 'completed'])
+
+const _ID_VERIFICATION_TYPES = new Set(['drivers_license', 'driver_license', 'state_id', 'passport', 'id_document', 'identity_document', 'id_front'])
+const _CERTIFICATION_VERIFICATION_TYPES = new Set(['cpr', 'first_aid', 'cna', 'hha', 'lvn', 'rn', 'dementia', 'hospice', 'tb', 'tb_clearance', 'other_certification'])
 
 async function _ensureCaregiverRequestHideColumns(db: any): Promise<void> {
   const statements = [
@@ -190,6 +207,119 @@ async function _ensureCaregiverRequestHideColumns(db: any): Promise<void> {
   ]
   for (const statement of statements) {
     try { await db.prepare(statement).run() } catch (_) {}
+  }
+}
+
+async function _ensureVerificationTables(db: any): Promise<void> {
+  const statements = [
+    `CREATE TABLE IF NOT EXISTS caregiver_verifications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      caregiver_id INTEGER NOT NULL,
+      doc_type TEXT NOT NULL,
+      r2_key TEXT,
+      front_url TEXT,
+      file_name TEXT,
+      mime_type TEXT,
+      consent_given INTEGER DEFAULT 0,
+      status TEXT DEFAULT 'pending',
+      submitted_at TEXT DEFAULT (datetime('now')),
+      reviewed_at TEXT,
+      approved_at TEXT,
+      reviewer_email TEXT,
+      rejection_reason TEXT,
+      admin_notes TEXT,
+      notes TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS caregiver_trust_scores (
+      caregiver_id INTEGER PRIMARY KEY,
+      score INTEGER DEFAULT 0,
+      level TEXT DEFAULT 'Basic',
+      id_verified INTEGER DEFAULT 0,
+      background_checked INTEGER DEFAULT 0,
+      cpr_certified INTEGER DEFAULT 0,
+      cna_verified INTEGER DEFAULT 0,
+      updated_at TEXT DEFAULT (datetime('now'))
+    )`,
+    `CREATE TABLE IF NOT EXISTS caregiver_background_checks (
+      caregiver_id INTEGER PRIMARY KEY,
+      status TEXT DEFAULT 'not_started',
+      provider TEXT,
+      initiated_at TEXT,
+      completed_at TEXT,
+      expires_at TEXT,
+      reviewed_at TEXT,
+      reviewer_email TEXT,
+      notes TEXT
+    )`,
+    `CREATE TABLE IF NOT EXISTS verification_audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      caregiver_id INTEGER NOT NULL,
+      verification_id INTEGER,
+      action TEXT NOT NULL,
+      actor_email TEXT,
+      notes TEXT,
+      created_at TEXT DEFAULT (datetime('now'))
+    )`,
+    'ALTER TABLE caregiver_verifications ADD COLUMN r2_key TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN front_url TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN file_name TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN mime_type TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN consent_given INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_verifications ADD COLUMN reviewed_at TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN approved_at TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN reviewer_email TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN rejection_reason TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN admin_notes TEXT',
+    'ALTER TABLE caregiver_verifications ADD COLUMN notes TEXT',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN level TEXT DEFAULT \'Basic\'',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN id_verified INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN background_checked INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN cpr_certified INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN cna_verified INTEGER DEFAULT 0',
+    'ALTER TABLE caregiver_trust_scores ADD COLUMN updated_at TEXT',
+    'ALTER TABLE verification_audit_logs ADD COLUMN actor_email TEXT',
+  ]
+  for (const statement of statements) {
+    try { await db.prepare(statement).run() } catch (_) {}
+  }
+}
+
+async function _refreshCaregiverTrustScore(db: any, caregiverId: number): Promise<void> {
+  await _ensureVerificationTables(db)
+  const idRow = await db.prepare(
+    `SELECT id FROM caregiver_verifications
+     WHERE caregiver_id = ? AND status = 'verified' AND doc_type IN ('drivers_license','driver_license','state_id','passport','id_document','identity_document','id_front')
+     LIMIT 1`
+  ).bind(caregiverId).first() as any
+  const bgRow = await db.prepare("SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?").bind(caregiverId).first() as any
+  const certRows = await db.prepare(
+    `SELECT doc_type FROM caregiver_verifications
+     WHERE caregiver_id = ? AND status = 'verified' AND doc_type IN ('cpr','first_aid','cna','hha','lvn','rn','dementia','hospice','tb','tb_clearance')`
+  ).bind(caregiverId).all() as any
+  const cg = await db.prepare('SELECT bio, photo_url, hourly_rate, skills FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first() as any
+  const certTypes = new Set((certRows.results || []).map((row: any) => row.doc_type))
+  let skills = []
+  try { skills = JSON.parse(cg?.skills || '[]') } catch {}
+  const idVerified = !!idRow
+  const backgroundChecked = bgRow?.status === 'verified'
+  const cprCertified = certTypes.has('cpr') || certTypes.has('first_aid')
+  const cnaVerified = certTypes.has('cna') || certTypes.has('hha')
+  const profileComplete = !!(cg?.bio && cg?.photo_url && cg?.hourly_rate && skills.length > 0)
+  const score = (idVerified ? 20 : 0) + (backgroundChecked ? 20 : 0) + (cprCertified ? 15 : 0) + (cnaVerified ? 10 : 0) + (profileComplete ? 10 : 0)
+  const level = score >= 90 ? 'Elite Caregiver' : score >= 70 ? 'Verified Pro' : score >= 40 ? 'Trusted' : 'Basic'
+  const existing = await db.prepare('SELECT caregiver_id FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(caregiverId).first() as any
+  if (existing) {
+    await db.prepare(
+      `UPDATE caregiver_trust_scores
+       SET score = ?, level = ?, id_verified = ?, background_checked = ?, cpr_certified = ?, cna_verified = ?, updated_at = datetime('now')
+       WHERE caregiver_id = ?`
+    ).bind(score, level, idVerified ? 1 : 0, backgroundChecked ? 1 : 0, cprCertified ? 1 : 0, cnaVerified ? 1 : 0, caregiverId).run()
+  } else {
+    await db.prepare(
+      `INSERT INTO caregiver_trust_scores
+       (caregiver_id, score, level, id_verified, background_checked, cpr_certified, cna_verified, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+    ).bind(caregiverId, score, level, idVerified ? 1 : 0, backgroundChecked ? 1 : 0, cprCertified ? 1 : 0, cnaVerified ? 1 : 0).run()
   }
 }
 
@@ -6159,6 +6289,8 @@ Return a JSON object with these fields:
           db.prepare('SELECT COUNT(*) as cnt FROM client_team').first() as any,
         ]);
         const pendingB = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE status = 'pending'").first() as any;
+        await _ensureVerificationTables(db);
+        const pendingV = await db.prepare("SELECT COUNT(*) as cnt FROM caregiver_verifications WHERE status = 'pending'").first() as any;
         const revenueUnlocks = (unlocked?.cnt || 0) * 4.99;
         return Response.json({
           totalClients: clients?.cnt || 0,
@@ -6166,6 +6298,7 @@ Return a JSON object with these fields:
           totalBookings: bookings?.cnt || 0,
           unlockedBookings: unlocked?.cnt || 0,
           pendingBookings: pendingB?.cnt || 0,
+          pendingVerifications: pendingV?.cnt || 0,
           totalTeamHires: team?.cnt || 0,
           estimatedRevenue: revenueUnlocks.toFixed(2),
         });
@@ -6217,6 +6350,103 @@ Return a JSON object with these fields:
       },
     },
 
+    // ====== SUPER ADMIN — VERIFICATION REVIEW QUEUE ======
+    {
+      path: 'admin-verifications',
+      method: 'get',
+      handler: async (req: PayloadRequest) => {
+        const admin = await _requireAdminAuth(req)
+        if (!admin) return Response.json({ success: false, error: 'Unauthorized' }, { status: 403 })
+        const db = cloudflare.env.D1 as D1Database
+        await _ensureVerificationTables(db)
+        const status = (req.query?.status as string) || 'pending'
+        const caregiverId = req.query?.caregiverId ? Number(req.query.caregiverId) : null
+        const limit = Math.min(Number(req.query?.limit || 100), 300)
+        const where: string[] = []
+        const binds: any[] = []
+        if (status && status !== 'all') {
+          where.push('cv.status = ?')
+          binds.push(status)
+        }
+        if (caregiverId) {
+          where.push('cv.caregiver_id = ?')
+          binds.push(caregiverId)
+        }
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+        const rows = await db.prepare(
+          `SELECT
+             cv.id, cv.caregiver_id, cv.doc_type, cv.status, cv.submitted_at, cv.reviewed_at, cv.approved_at,
+             cv.rejection_reason, cv.admin_notes, cv.file_name, cv.mime_type, cv.r2_key, cv.front_url, cv.consent_given, cv.notes,
+             ca.name as caregiver_name, ca.email as caregiver_email, ca.city as caregiver_city, ca.state as caregiver_state,
+             cts.score as trust_score, cts.level as trust_level
+           FROM caregiver_verifications cv
+           LEFT JOIN caregiver_accounts ca ON ca.id = cv.caregiver_id
+           LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id = cv.caregiver_id
+           ${whereSql}
+           ORDER BY COALESCE(cv.submitted_at, '') DESC, cv.id DESC
+           LIMIT ?`
+        ).bind(...binds, limit).all() as any
+        return Response.json({ success: true, verifications: rows.results || [] })
+      },
+    },
+
+    // ====== SUPER ADMIN — APPROVE / REJECT VERIFICATION ======
+    {
+      path: 'admin-verifications/review',
+      method: 'post',
+      handler: async (req: PayloadRequest) => {
+        const admin = await _requireAdminAuth(req)
+        if (!admin) return Response.json({ success: false, error: 'Unauthorized' }, { status: 403 })
+        const db = cloudflare.env.D1 as D1Database
+        await _ensureVerificationTables(db)
+        const body = await req.json().catch(() => ({})) as any
+        const id = Number(body.id || body.verificationId)
+        const action = String(body.action || '').toLowerCase()
+        const status = action === 'approve' || action === 'approved' || action === 'verified'
+          ? 'verified'
+          : action === 'reject' || action === 'rejected'
+            ? 'rejected'
+            : ''
+        if (!id || !status) return Response.json({ success: false, error: 'id and action=approve|reject required' }, { status: 400 })
+        const row = await db.prepare('SELECT * FROM caregiver_verifications WHERE id = ?').bind(id).first() as any
+        if (!row) return Response.json({ success: false, error: 'Verification not found' }, { status: 404 })
+        const notes = String(body.notes || body.adminNotes || '')
+        const rejectionReason = status === 'rejected' ? String(body.rejectionReason || body.reason || notes || 'Not approved') : null
+        await db.prepare(
+          `UPDATE caregiver_verifications
+           SET status = ?, reviewed_at = datetime('now'), approved_at = CASE WHEN ? = 'verified' THEN datetime('now') ELSE NULL END,
+               reviewer_email = ?, rejection_reason = ?, admin_notes = ?
+           WHERE id = ?`
+        ).bind(status, status, admin.email, rejectionReason, notes, id).run()
+
+        const docType = String(row.doc_type || '')
+        if (docType === 'background_check' || docType === 'background_consent') {
+          const bgStatus = status === 'verified' ? 'verified' : 'rejected'
+          const existingBg = await db.prepare('SELECT caregiver_id FROM caregiver_background_checks WHERE caregiver_id = ?').bind(row.caregiver_id).first() as any
+          if (existingBg) {
+            await db.prepare(
+              `UPDATE caregiver_background_checks
+               SET status = ?, completed_at = CASE WHEN ? = 'verified' THEN datetime('now') ELSE completed_at END,
+                   reviewed_at = datetime('now'), reviewer_email = ?, notes = ?
+               WHERE caregiver_id = ?`
+            ).bind(bgStatus, bgStatus, admin.email, notes || rejectionReason || '', row.caregiver_id).run()
+          } else {
+            await db.prepare(
+              `INSERT INTO caregiver_background_checks
+               (caregiver_id, status, provider, initiated_at, completed_at, reviewed_at, reviewer_email, notes)
+               VALUES (?, ?, 'manual_review', datetime('now'), CASE WHEN ? = 'verified' THEN datetime('now') ELSE NULL END, datetime('now'), ?, ?)`
+            ).bind(row.caregiver_id, bgStatus, bgStatus, admin.email, notes || rejectionReason || '').run()
+          }
+        }
+
+        await db.prepare('INSERT INTO verification_audit_logs (caregiver_id, verification_id, action, actor_email, notes) VALUES (?,?,?,?,?)')
+          .bind(row.caregiver_id, id, status, admin.email, notes || rejectionReason || '').run()
+        await _refreshCaregiverTrustScore(db, Number(row.caregiver_id))
+        const trust = await db.prepare('SELECT * FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(row.caregiver_id).first() as any
+        return Response.json({ success: true, id, status, caregiverId: row.caregiver_id, trust })
+      },
+    },
+
 
     // ====== VERIFICATION — STATUS (GET all records for logged-in caregiver) ======
     {
@@ -6229,11 +6459,12 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          await _ensureVerificationTables(env.D1)
           const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
           const cgId = sess.account_id
           const { results: verifications } = await env.D1.prepare(
-            'SELECT id, doc_type, status, submitted_at, reviewed_at, approved_at, rejection_reason, admin_notes, file_name, consent_given FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY submitted_at DESC'
+            'SELECT id, doc_type, status, submitted_at, reviewed_at, approved_at, rejection_reason, admin_notes, file_name, mime_type, consent_given, notes FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY submitted_at DESC'
           ).bind(cgId).all()
           // Also get trust score
           const trust = await env.D1.prepare('SELECT * FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(cgId).first() as any
@@ -6254,21 +6485,24 @@ Return a JSON object with these fields:
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
           const env = cloudflare.env as any
-          let token: string, docType: string, consentGiven: number, file: File | null
+          let token: string, docType: string, consentGiven: number, file: File | null, expiry: string
           try {
             const fd = await req.formData()
             token = fd.get('token') || ''
-            docType = fd.get('doc_type') || 'id_front'
+            docType = fd.get('doc_type') || fd.get('cert_type') || 'id_front'
             consentGiven = fd.get('consent_given') === 'true' ? 1 : 0
+            expiry = String(fd.get('expiry') || '')
             file = fd.get('file') || null
           } catch {
             const body = await req.json().catch(() => ({})) as any
             token = body.token || ''
-            docType = body.doc_type || 'background_consent'
+            docType = body.doc_type || body.cert_type || 'background_consent'
             consentGiven = body.consent_given ? 1 : 0
+            expiry = String(body.expiry || '')
             file = null
           }
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 400, headers })
+          await _ensureVerificationTables(env.D1)
           const sess = await env.D1.prepare('SELECT account_id FROM caregiver_sessions WHERE token = ?').bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Unauthorized' }, { status: 401, headers })
           const cgId = sess.account_id
@@ -6288,15 +6522,15 @@ Return a JSON object with these fields:
           const existing = await env.D1.prepare('SELECT id FROM caregiver_verifications WHERE caregiver_id = ? AND doc_type = ? AND status IN (\'pending\', \'rejected\')').bind(cgId, docType).first() as any
           if (existing) {
             await env.D1.prepare(
-              'UPDATE caregiver_verifications SET status=\'pending\', r2_key=COALESCE(?,r2_key), file_name=COALESCE(?,file_name), mime_type=COALESCE(?,mime_type), consent_given=?, submitted_at=datetime(\'now\'), admin_notes=NULL, rejection_reason=NULL, reviewer_email=NULL, approved_at=NULL WHERE id=?'
-            ).bind(r2Key, fileName, mimeType, consentGiven, existing.id).run()
+              'UPDATE caregiver_verifications SET status=\'pending\', r2_key=COALESCE(?,r2_key), file_name=COALESCE(?,file_name), mime_type=COALESCE(?,mime_type), consent_given=?, notes=?, submitted_at=datetime(\'now\'), admin_notes=NULL, rejection_reason=NULL, reviewer_email=NULL, approved_at=NULL WHERE id=?'
+            ).bind(r2Key, fileName, mimeType, consentGiven, expiry ? `Expires: ${expiry}` : '', existing.id).run()
             // Audit log
             await env.D1.prepare('INSERT INTO verification_audit_logs (caregiver_id, verification_id, action, notes) VALUES (?,?,?,?)').bind(cgId, existing.id, 'resubmitted', docType).run()
             return Response.json({ success: true, id: existing.id, r2Key, docType, status: 'pending' }, { headers })
           } else {
             const result = await env.D1.prepare(
-              'INSERT INTO caregiver_verifications (caregiver_id, doc_type, r2_key, file_name, mime_type, consent_given, status, submitted_at) VALUES (?,?,?,?,?,?,\'pending\',datetime(\'now\'))'
-            ).bind(cgId, docType, r2Key, fileName, mimeType, consentGiven).run() as any
+              'INSERT INTO caregiver_verifications (caregiver_id, doc_type, r2_key, file_name, mime_type, consent_given, status, submitted_at, notes) VALUES (?,?,?,?,?,?,\'pending\',datetime(\'now\'),?)'
+            ).bind(cgId, docType, r2Key, fileName, mimeType, consentGiven, expiry ? `Expires: ${expiry}` : '').run() as any
             const newId = result.meta?.last_row_id
             // Audit log
             await env.D1.prepare('INSERT INTO verification_audit_logs (caregiver_id, verification_id, action, notes) VALUES (?,?,?,?)').bind(cgId, newId, 'submitted', docType).run()
