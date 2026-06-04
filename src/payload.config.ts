@@ -173,6 +173,9 @@ async function _requireClientAuthFromBody(req: any, body: any): Promise<{ email:
   return { email: row.email }
 }
 
+const _HIDEABLE_INTERVIEW_STATUSES = new Set(['completed', 'cancelled', 'declined', 'expired', 'no_show'])
+const _HIDEABLE_HIRE_OFFER_STATUSES = new Set(['declined', 'expired', 'cancelled', 'rejected', 'completed'])
+
 async function _ensureCaregiverRequestHideColumns(db: any): Promise<void> {
   const statements = [
     'ALTER TABLE caregiver_bookings ADD COLUMN caregiver_hidden INTEGER DEFAULT 0',
@@ -2717,20 +2720,28 @@ Return a JSON object with these fields:
               'SELECT id, status FROM caregiver_bookings WHERE id = ? AND caregiver_id = ?'
             ).bind(Number(itemId), cgSess.account_id).first() as any
             if (!booking) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
+            const status = String(booking.status || '').toLowerCase()
+            if (!_HIDEABLE_INTERVIEW_STATUSES.has(status)) {
+              return Response.json({ success: false, error: 'Interview cannot be removed in its current status' }, { status: 409, headers })
+            }
             await db.prepare(
               "UPDATE caregiver_bookings SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
             ).bind(hideReason, Number(itemId), cgSess.account_id).run()
-            return Response.json({ success: true, itemId, itemType }, { headers })
+            return Response.json({ success: true, hidden: true, itemId, itemType }, { headers })
           }
 
           const agreement = await db.prepare(
             'SELECT id, status FROM hire_agreements WHERE id = ? AND caregiver_id = ?'
           ).bind(Number(itemId), cgSess.account_id).first() as any
           if (!agreement) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
+          const status = String(agreement.status || '').toLowerCase()
+          if (!_HIDEABLE_HIRE_OFFER_STATUSES.has(status)) {
+            return Response.json({ success: false, error: 'Hire offer cannot be removed in its current status' }, { status: 409, headers })
+          }
           await db.prepare(
             "UPDATE hire_agreements SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
           ).bind(hideReason, Number(itemId), cgSess.account_id).run()
-          return Response.json({ success: true, itemId, itemType }, { headers })
+          return Response.json({ success: true, hidden: true, itemId, itemType }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -4424,7 +4435,7 @@ Return a JSON object with these fields:
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { status: 401, headers })
           await _ensureCaregiverRequestHideColumns(env.D1)
           const result = await env.D1.prepare(
-            "SELECT * FROM hire_agreements WHERE caregiver_id = ? AND status IN ('pending_caregiver', 'active', 'declined', 'expired', 'cancelled', 'rejected') AND COALESCE(caregiver_hidden, 0) = 0 ORDER BY created_at DESC LIMIT 20"
+            "SELECT * FROM hire_agreements WHERE caregiver_id = ? AND status IN ('pending_caregiver', 'pending_client', 'active', 'declined', 'expired', 'cancelled', 'rejected', 'completed') AND COALESCE(caregiver_hidden, 0) = 0 ORDER BY created_at DESC LIMIT 20"
           ).bind(sess.id).all()
           return Response.json({ success: true, offers: result.results || [] }, { headers })
         } catch (e: any) {
