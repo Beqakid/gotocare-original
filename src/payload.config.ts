@@ -4011,7 +4011,7 @@ Return a JSON object with these fields:
     },
     // ============ CAREGIVER DOCUMENTS ============
     {
-      path: '/caregiver-documents',
+      path: '/cgp-docs',
       method: 'get',
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
@@ -4047,7 +4047,7 @@ Return a JSON object with these fields:
       },
     },
     {
-      path: '/caregiver-documents',
+      path: '/cgp-docs',
       method: 'post',
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
@@ -4092,7 +4092,7 @@ Return a JSON object with these fields:
       },
     },
     {
-      path: '/caregiver-documents',
+      path: '/cgp-docs',
       method: 'delete',
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
@@ -4119,7 +4119,7 @@ Return a JSON object with these fields:
       },
     },
     {
-      path: '/caregiver-documents/file',
+      path: '/cgp-docs/file',
       method: 'get',
       handler: async (req: any) => {
         const headers = { 'Access-Control-Allow-Origin': '*' }
@@ -4747,16 +4747,16 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, timer } = body
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const timerPostSess = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!timerPostSess) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           if (timer === null) {
-            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerSession.email).run()
+            await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerPostSess.email).run()
           } else {
             await cloudflare.env.D1.prepare(
               'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
-            ).bind(timerSession.email, JSON.stringify(timer)).run()
+            ).bind(timerPostSess.email, JSON.stringify(timer)).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
