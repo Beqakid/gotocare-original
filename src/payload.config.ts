@@ -2225,6 +2225,9 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { email, plan } = body
           const caregiverId = (body as any).caregiverId || null
+          // Phase 26A: extract careAction and returnContext for success_url embedding
+          const careAction = (body as any).careAction || null
+          const returnContext = (body as any).returnContext || null
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
 
           const priceMap: Record<string, string> = {
@@ -2234,6 +2237,28 @@ Return a JSON object with these fields:
           }
           const priceId = priceMap[plan.toLowerCase()]
           if (!priceId) return Response.json({ error: 'Invalid plan' }, { status: 400 })
+
+          // Phase 26A: Build success_url with full context so app can restore caregiver + action
+          const successBase = 'https://app.carehia.com/'
+          const successParams = new URLSearchParams({
+            subscription: 'success',
+            plan,
+            email,
+            session_id: '{CHECKOUT_SESSION_ID}',
+            return_to: 'findcare',
+          })
+          if (caregiverId) successParams.set('caregiver_return', String(caregiverId))
+          if (careAction) successParams.set('care_action', careAction)
+          const successUrl = successBase + '?' + successParams.toString() + '#findcare'
+
+          // Phase 26A: Build cancel_url — use correct domain, pass context for retry
+          const cancelParams = new URLSearchParams({
+            subscription: 'cancelled',
+            return_to: 'findcare',
+          })
+          if (caregiverId) cancelParams.set('caregiver_return', String(caregiverId))
+          if (careAction) cancelParams.set('care_action', careAction)
+          const cancelUrl = 'https://app.carehia.com/?' + cancelParams.toString() + '#findcare'
 
           const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
           const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
@@ -2247,11 +2272,13 @@ Return a JSON object with these fields:
               'customer_email': email,
               'line_items[0][price]': priceId,
               'line_items[0][quantity]': '1',
-              'success_url': 'https://app.carehia.com/?subscription=success&plan=' + plan + '&email=' + encodeURIComponent(email) + (caregiverId ? '&caregiver_return=' + encodeURIComponent(String(caregiverId)) : ''),
-              'cancel_url': 'https://gotocare-client-portal.pages.dev/?subscription=cancelled',
+              'success_url': successUrl,
+              'cancel_url': cancelUrl,
               'metadata[plan]': plan,
               'metadata[client_email]': email,
               'metadata[type]': 'client_subscription',
+              ...(caregiverId ? { 'metadata[caregiver_id]': String(caregiverId) } : {}),
+              ...(careAction ? { 'metadata[care_action]': careAction } : {}),
               'allow_promotion_codes': 'true',
             }).toString(),
           })
