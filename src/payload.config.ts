@@ -3776,7 +3776,10 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const token = url.searchParams.get('token')
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?token= query param
+          const authHdr2 = req.headers?.get('Authorization') || ''
+          const token = (authHdr2.startsWith('Bearer ') ? authHdr2.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('token') || ''
           if (!token) return Response.json({ error: 'token required' }, { status: 400 })
 
           // Validate client session (field is session_token, not token)
@@ -4156,7 +4159,10 @@ Return a JSON object with these fields:
           const env = cloudflare.env as any
           const url = new URL(req.url)
           const caregiverEmail = url.searchParams.get('email') || ''
-          const clientToken = url.searchParams.get('clientToken') || ''
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?clientToken= query param
+          const _authHdrPD = req.headers?.get('Authorization') || ''
+          const clientToken = (_authHdrPD.startsWith('Bearer ') ? _authHdrPD.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           if (!caregiverEmail) return Response.json({ success: false, error: 'Caregiver email required' }, { headers })
           // Get all docs for this caregiver
           const docs = await env.D1.prepare('SELECT id, name, doc_type, expiry_date, status FROM caregiver_documents WHERE caregiver_email = ? ORDER BY created_at DESC').bind(caregiverEmail).all()
@@ -4189,7 +4195,10 @@ Return a JSON object with these fields:
         try {
           const env = cloudflare.env as any
           const url = new URL(req.url)
-          const clientToken = url.searchParams.get('clientToken') || ''
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?clientToken= query param
+          const _authHdrTL = req.headers?.get('Authorization') || ''
+          const clientToken = (_authHdrTL.startsWith('Bearer ') ? _authHdrTL.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first()
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
@@ -4255,7 +4264,10 @@ Return a JSON object with these fields:
         try {
           const env = cloudflare.env as any
           const url = new URL(req.url)
-          const clientToken = url.searchParams.get('clientToken') || ''
+          // SECURITY (P18): Accept Authorization: Bearer header OR query param
+          const _authHdrSG = req.headers?.get('Authorization') || ''
+          const clientToken = (_authHdrSG.startsWith('Bearer ') ? _authHdrSG.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           const caregiverEmail = url.searchParams.get('caregiverEmail') || ''
           if (!clientToken) return Response.json({ success: false, error: 'Token required' }, { headers })
           const sess = await env.D1.prepare('SELECT email FROM client_sessions WHERE session_token = ? AND expires_at > datetime(\'now\')').bind(clientToken).first() as any
@@ -5604,7 +5616,7 @@ Return a JSON object with these fields:
           const ra = reviewAgg as any; const bk = bookingCount as any; const mt = metrics as any
           const score = ((idVerif as any)?.status==='verified'?20:0)+((bgCheck as any)?.status==='verified'?20:0)+(hasCPR?15:0)+(hasCNA?10:0)+(profileComplete?10:0)+((bk?.cnt||0)>=5?10:0)+(mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0?5:0)+((mt?.repeat_bookings||0)>=3?5:0)+((ra?.avg||0)>=4.9&&(ra?.cnt||0)>=3?5:0)
           const level = score>=90?'Elite Caregiver':score>=70?'Verified Pro':score>=40?'Trusted':'Basic'
-          return Response.json({ success: true, score, level, idVerified: (idVerif as any)?.status==='verified', backgroundChecked: (bgCheck as any)?.status==='verified', hasCPR, hasCNA, reviewCount: ra?.cnt||0, avgRating: Math.round((ra?.avg||0)*10)/10, fastResponder: mt?.avg_response_minutes<=5&&mt?.avg_response_minutes>0 }, { headers })
+          return Response.json({ success: true, score, level, idVerified: (idVerif as any)?.status==='verified', backgroundChecked: (bgCheck as any)?.status==='verified', hasCPR, hasCNA, reviewCount: ra?.cnt||0, avgRating: Math.round((ra?.avg||0)*10)/10  /* fastResponder removed Phase-18: internal metric — see Phase 15 rules */ }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
         }
@@ -6122,7 +6134,10 @@ Return a JSON object with these fields:
         const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
         try {
           const url = new URL(req.url || '', 'http://x')
-          const clientToken = url.searchParams.get('clientToken')
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?clientToken= query param
+          const _authHdrOC = req.headers?.get('Authorization') || ''
+          const clientToken = (_authHdrOC.startsWith('Bearer ') ? _authHdrOC.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           if (!clientToken) return Response.json({ active: false, error: 'clientToken required' }, { status: 400, headers })
 
           const db = (cloudflare as any).env.D1
@@ -6183,7 +6198,10 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const token = url.searchParams.get('clientToken')
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?clientToken= query param
+          const _authHdrPR = req.headers?.get('Authorization') || ''
+          const token = (_authHdrPR.startsWith('Bearer ') ? _authHdrPR.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
           const headers = { 'Access-Control-Allow-Origin': '*' }
           const db = (cloudflare.env as any).D1
@@ -6240,7 +6258,10 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const url = new URL(req.url)
-          const token = url.searchParams.get('clientToken')
+          // SECURITY (P18): Accept Authorization: Bearer header OR ?clientToken= query param
+          const _authHdrSL = req.headers?.get('Authorization') || ''
+          const token = (_authHdrSL.startsWith('Bearer ') ? _authHdrSL.slice(7) : '') ||
+            req.headers?.get('x-session-token') || url.searchParams.get('clientToken') || ''
           if (!token) return Response.json({ error: 'clientToken required' }, { status: 400 })
           const headers = { 'Access-Control-Allow-Origin': '*' }
           const db = (cloudflare.env as any).D1
