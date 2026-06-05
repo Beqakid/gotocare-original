@@ -2801,14 +2801,24 @@ Return a JSON object with these fields:
           const caregiverId = String(session.account_id)
 
           const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          // Phase 26B: contextual success/cancel URLs with action restore params
+          const cAct = String(body.caregiverAction || 'unlock_request')
+          const cRt  = String(body.returnTab  || 'work')
+          const cRv  = String(body.returnView || 'requests')
+          const cRid = String(body.requestId  || '')
+          const cHash = cRt === 'work' ? 'schedule' : cRt === 'today' ? 'home' : cRt === 'money' ? 'earnings' : cRt
+          const successUrl = `https://work.carehia.com/?subscription=success&role=caregiver&session_id={CHECKOUT_SESSION_ID}&plan=unlimited&caregiver_action=${encodeURIComponent(cAct)}&request_id=${encodeURIComponent(cRid)}&return_tab=${encodeURIComponent(cRt)}&return_view=${encodeURIComponent(cRv)}#${cHash}`
+          const cancelUrl  = `https://work.carehia.com/?subscription=cancelled&role=caregiver&caregiver_action=${encodeURIComponent(cAct)}&request_id=${encodeURIComponent(cRid)}&return_tab=${encodeURIComponent(cRt)}&return_view=${encodeURIComponent(cRv)}#${cHash}`
           const params = new URLSearchParams({
             'mode': 'subscription',
             'line_items[0][price]': 'price_1TQmcY6E8zcVOY4tSOJ9E3X2',
             'line_items[0][quantity]': '1',
-            'success_url': 'https://work.carehia.com/?subscription=success#profile',
-            'cancel_url': 'https://work.carehia.com/?subscription=cancelled#profile',
+            'success_url': successUrl,
+            'cancel_url': cancelUrl,
             'metadata[caregiver_id]': caregiverId,
             'metadata[type]': 'caregiver_subscription',
+            'metadata[caregiver_action]': cAct,
+            'metadata[return_tab]': cRt,
           })
           const stripeRes = await fetch('https://api.stripe.com/v1/checkout/sessions', {
             method: 'POST',
