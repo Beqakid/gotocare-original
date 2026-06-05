@@ -3077,6 +3077,27 @@ Return a JSON object with these fields:
             "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
           ).bind(token, account.id).run()
 
+          // ── Phase 20: referral code + acquisition tracking (additive, non-blocking) ──
+          try {
+            const p20inviteCode = body.invite_code || null
+            const p20refCode = body.ref_code || null
+            const p20campaign = body.campaign || (p20inviteCode ? 'invite_link' : p20refCode ? 'caregiver_referral' : 'direct_signup')
+            const p20source = body.source || 'direct'
+            // Deterministic referral code: CGP{id}
+            const p20myRefCode = 'CGP' + account.id
+            await cloudflare.env.D1.prepare(
+              'INSERT OR IGNORE INTO caregiver_referral_codes (caregiver_id, caregiver_email, referral_code) VALUES (?, ?, ?)'
+            ).bind(account.id, email.toLowerCase(), p20myRefCode).run()
+            await cloudflare.env.D1.prepare(
+              'INSERT OR IGNORE INTO caregiver_acquisition (caregiver_id, caregiver_email, invite_code, referral_code, campaign, source) VALUES (?, ?, ?, ?, ?, ?)'
+            ).bind(account.id, email.toLowerCase(), p20inviteCode, p20refCode, p20campaign, p20source).run()
+            if (p20inviteCode) {
+              await cloudflare.env.D1.prepare(
+                'UPDATE caregiver_invites SET signups = signups + 1 WHERE code = ?'
+              ).bind(p20inviteCode).run()
+            }
+          } catch (_p20err) { /* non-critical — never fail registration */ }
+
           // Send verification email via Resend
           const verifyLink = `https://work.carehia.com?verify=${verificationToken}`
           try {
