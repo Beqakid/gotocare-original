@@ -4732,7 +4732,17 @@ Return a JSON object with these fields:
             'SELECT * FROM caregiver_active_timer WHERE caregiver_email = ?'
           ).bind(timerSession.email).first() as any
           if (!row) return Response.json({ timer: null }, { headers })
-          return Response.json({ timer: JSON.parse(row.timer_json || 'null') }, { headers })
+          // Reconstruct timer object from individual columns (table has no timer_json)
+          const timerObj = {
+            clientName: row.client_name || '',
+            startTime: row.start_time || new Date().toISOString(),
+            hourlyRate: row.hourly_rate || 25,
+            billingType: row.billing_type || 'hourly',
+            otAfterHrs: row.ot_after_hrs || 8,
+            otMultiplier: row.ot_multiplier || 1.5,
+            notes: row.notes || '',
+          }
+          return Response.json({ timer: timerObj }, { headers })
         } catch (error) {
           return Response.json({ timer: null }, { headers })
         }
@@ -4755,8 +4765,17 @@ Return a JSON object with these fields:
             await cloudflare.env.D1.prepare('DELETE FROM caregiver_active_timer WHERE caregiver_email = ?').bind(timerPostSess.email).run()
           } else {
             await cloudflare.env.D1.prepare(
-              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, timer_json, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)'
-            ).bind(timerPostSess.email, JSON.stringify(timer)).run()
+              'INSERT OR REPLACE INTO caregiver_active_timer (caregiver_email, client_name, start_time, hourly_rate, billing_type, ot_after_hrs, ot_multiplier, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)'
+            ).bind(
+              timerPostSess.email,
+              timer.clientName || '',
+              timer.startTime || new Date().toISOString(),
+              timer.hourlyRate || 25,
+              timer.billingType || 'hourly',
+              timer.otAfterHrs || 8,
+              timer.otMultiplier || 1.5,
+              timer.notes || ''
+            ).run()
           }
           return Response.json({ success: true }, { headers })
         } catch (error) {
