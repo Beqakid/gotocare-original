@@ -3988,18 +3988,13 @@ Return a JSON object with these fields:
           if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
 
           const sess = await env.D1.prepare(
-            "SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT cs.account_id, ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
 
-          const cgRow = await env.D1.prepare(
-            'SELECT id FROM caregiver_accounts WHERE email = ?'
-          ).bind(sess.email).first() as any
-          if (!cgRow) return Response.json({ success: false, error: 'Caregiver not found' }, { headers })
-
           const rows = await env.D1.prepare(
             'SELECT ct.*, ca.name AS client_name, ca.email AS client_email_addr FROM client_team ct LEFT JOIN client_accounts ca ON ca.email = ct.client_email WHERE ct.caregiver_id = ? AND ct.status = "active" ORDER BY ct.hired_at DESC'
-          ).bind(Number(cgRow.id)).all()
+          ).bind(Number(sess.account_id)).all()
 
           const clients = (rows.results || []).map((r: any) => ({
             clientEmail: r.client_email,
@@ -4025,9 +4020,17 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
-          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
-          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
-          const docs = await env.D1.prepare('SELECT * FROM caregiver_documents WHERE caregiver_email = ? ORDER BY created_at DESC').bind(sess.email).all()
+          // Create marketplace docs table if not exists
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS cgp_documents (
+            id TEXT PRIMARY KEY, caregiver_email TEXT NOT NULL, name TEXT NOT NULL,
+            doc_type TEXT DEFAULT 'certification', r2_key TEXT, file_name TEXT,
+            expiry_date TEXT, status TEXT DEFAULT 'no_expiry',
+            created_at TEXT DEFAULT (datetime('now')))`).run().catch(()=>{})
+          const docSess = await env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!docSess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const docs = await env.D1.prepare('SELECT * FROM cgp_documents WHERE caregiver_email = ? ORDER BY created_at DESC').bind(docSess.email).all()
           // Compute status for each doc
           const now = Date.now()
           const withStatus = (docs.results || []).map((d: any) => {
@@ -4058,8 +4061,11 @@ Return a JSON object with these fields:
           const file = formData.get('file')
           if (!token) return Response.json({ success: false, error: 'Token required' }, { headers })
           if (!name) return Response.json({ success: false, error: 'Document name required' }, { headers })
-          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
-          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const docPostSess = await env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!docPostSess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const sess = docPostSess  // alias for remaining code
           const id = crypto.randomUUID()
           let r2Key = null
           let fileName = null
@@ -4077,7 +4083,7 @@ Return a JSON object with these fields:
             else if (diff < 30) status = 'expiring_soon'
             else status = 'valid'
           }
-          await env.D1.prepare('INSERT INTO caregiver_documents (id, caregiver_email, name, doc_type, r2_key, file_name, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, sess.email, name, docType, r2Key, fileName, expiryDate || null, status).run()
+          await env.D1.prepare('INSERT INTO cgp_documents (id, caregiver_email, name, doc_type, r2_key, file_name, expiry_date, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').bind(id, sess.email, name, docType, r2Key, fileName, expiryDate || null, status).run()
           const doc = { id, caregiver_email: sess.email, name, doc_type: docType, r2_key: r2Key, file_name: fileName, expiry_date: expiryDate || null, status }
           return Response.json({ success: true, document: doc }, { headers })
         } catch (e: any) {
@@ -4096,14 +4102,16 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           const id = url.searchParams.get('id') || ''
           if (!token || !id) return Response.json({ success: false, error: 'Token and id required' }, { headers })
-          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
-          if (!sess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
+          const docDelSess = await env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!docDelSess) return Response.json({ success: false, error: 'Invalid session' }, { headers })
           // Get the doc to delete from R2 too
-          const doc = await env.D1.prepare('SELECT r2_key FROM caregiver_documents WHERE id = ? AND caregiver_email = ?').bind(id, sess.email).first()
+          const doc = await env.D1.prepare('SELECT r2_key FROM cgp_documents WHERE id = ? AND caregiver_email = ?').bind(id, docDelSess.email).first()
           if (doc?.r2_key) {
             try { await env.R2.delete(doc.r2_key) } catch {}
           }
-          await env.D1.prepare('DELETE FROM caregiver_documents WHERE id = ? AND caregiver_email = ?').bind(id, sess.email).run()
+          await env.D1.prepare('DELETE FROM cgp_documents WHERE id = ? AND caregiver_email = ?').bind(id, docDelSess.email).run()
           return Response.json({ success: true }, { headers })
         } catch (e: any) {
           return Response.json({ success: false, error: e.message }, { headers })
@@ -4123,10 +4131,12 @@ Return a JSON object with these fields:
           const authHeader = req.headers.get('Authorization') || ''
           const token = (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '') || url.searchParams.get('token') || ''
           if (!key || !token) return Response.json({ error: 'Key and token required' }, { status: 400, headers })
-          const sess = await env.D1.prepare('SELECT email FROM caregiver_sessions WHERE token = ? AND expires_at > datetime(\'now\')').bind(token).first()
-          if (!sess) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const fileDocSess = await env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!fileDocSess) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
           // SECURITY (RISK-03): verify document belongs to the authenticated caregiver
-          const docOwner = await env.D1.prepare('SELECT id FROM caregiver_documents WHERE r2_key = ? AND caregiver_email = ?').bind(key, sess.email).first()
+          const docOwner = await env.D1.prepare('SELECT id FROM cgp_documents WHERE r2_key = ? AND caregiver_email = ?').bind(key, fileDocSess.email).first()
           if (!docOwner) return Response.json({ error: 'Forbidden' }, { status: 403, headers })
           const obj = await env.R2.get(key)
           if (!obj) return Response.json({ error: 'File not found' }, { status: 404, headers })
@@ -4860,6 +4870,56 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ====== SEND INVOICE BY EMAIL ======
+    {
+      path: '/caregiver-invoice-send',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const body = await req.json()
+          const { token, cloudId, invoice, caregiverInfo } = body
+          if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
+          const env = cloudflare.env as any
+          const invSess = await env.D1.prepare(
+            "SELECT ca.email, ca.name FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
+          ).bind(token).first() as any
+          if (!invSess) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          // Look up the invoice
+          const inv = await env.D1.prepare(
+            'SELECT * FROM caregiver_personal_invoices WHERE id = ?'
+          ).bind(Number(cloudId)).first() as any
+          if (!inv) return Response.json({ success: false, error: 'Invoice not found' }, { status: 404, headers })
+          // Send via Resend if client email available
+          const resendKey = env.RESEND_API_KEY || ''
+          const toEmail = invoice?.clientEmail || ''
+          const cgName = caregiverInfo?.name || invSess.name || 'Your Caregiver'
+          const amount = Number(invoice?.amount || inv.amount || 0).toFixed(2)
+          const invNum = inv.invoice_number || cloudId
+          if (resendKey && toEmail && toEmail.includes('@')) {
+            await fetch('https://api.resend.com/emails', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + resendKey, 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                from: 'hello@carehia.com',
+                to: [toEmail],
+                subject: 'Invoice from ' + cgName + ' — $' + amount,
+                html: '<p>Hi,</p><p>' + cgName + ' has sent you an invoice for <strong>$' + amount + '</strong>.</p><p>Invoice #' + invNum + '</p><p>Due: ' + (inv.due_date || 'Upon receipt') + '</p><p>Thank you,<br/>Carehia</p>',
+              }),
+            }).catch(() => {})
+          }
+          // Mark as sent
+          await env.D1.prepare(
+            "UPDATE caregiver_personal_invoices SET status = 'sent' WHERE id = ?"
+          ).bind(Number(cloudId)).run()
+          return Response.json({ success: true, message: 'Invoice sent' }, { headers })
+        } catch (error) {
+          return Response.json({ success: false, error: String(error) }, { status: 500, headers })
+        }
+      },
+    },
+
     // ====== PRIVATE CLIENTS ======
     {
       path: '/caregiver-private-clients',
@@ -4955,13 +5015,13 @@ Return a JSON object with these fields:
           const url = new URL(req.url)
           const token = url.searchParams.get('token') || ''
           if (!token) return Response.json({ success: false, error: 'token required' }, { status: 401, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const mileSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!mileSession) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const result = await cloudflare.env.D1.prepare(
-            'SELECT * FROM caregiver_mileage WHERE caregiver_id = ? ORDER BY date DESC LIMIT 200'
-          ).bind(session.account_id).all()
+            'SELECT * FROM caregiver_mileage WHERE caregiver_email = ? ORDER BY date DESC LIMIT 200'
+          ).bind(mileSession.email).all()
           const entries = (result.results || []).map((m: any) => ({
             id: 'cloud_' + m.id,
             cloudId: String(m.id),
@@ -4969,7 +5029,7 @@ Return a JSON object with these fields:
             clientName: m.client_name,
             miles: m.miles,
             purpose: m.purpose || '',
-            notes: m.notes || '',
+            notes: '',
           }))
           return Response.json({ success: true, entries }, { headers })
         } catch (error) {
@@ -4986,15 +5046,15 @@ Return a JSON object with these fields:
           const body = await req.json()
           const { token, entry } = body
           if (!token || !entry) return Response.json({ success: false, error: 'token and entry required' }, { status: 400, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const milePostSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!milePostSession) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           const r = await cloudflare.env.D1.prepare(
-            'INSERT INTO caregiver_mileage (caregiver_id, date, client_name, miles, purpose, notes) VALUES (?, ?, ?, ?, ?, ?)'
+            'INSERT INTO caregiver_mileage (caregiver_email, date, client_name, miles, purpose) VALUES (?, ?, ?, ?, ?)'
           ).bind(
-            session.account_id, entry.date || '', entry.clientName || '',
-            entry.miles || 0, entry.purpose || '', entry.notes || ''
+            milePostSession.email, entry.date || '', entry.clientName || '',
+            entry.miles || 0, entry.purpose || ''
           ).run() as any
           return Response.json({ success: true, cloudId: String(r.meta?.last_row_id || r.lastRowId || '') }, { headers })
         } catch (error) {
@@ -5012,13 +5072,13 @@ Return a JSON object with these fields:
           const token = url.searchParams.get('token') || ''
           const cloudId = url.searchParams.get('cloudId') || ''
           if (!token || !cloudId) return Response.json({ success: false, error: 'token and cloudId required' }, { status: 400, headers })
-          const session = await cloudflare.env.D1.prepare(
-            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+          const mileDelSession = await cloudflare.env.D1.prepare(
+            "SELECT ca.email FROM caregiver_sessions cs JOIN caregiver_accounts ca ON ca.id = cs.account_id WHERE cs.token = ? AND cs.expires_at > datetime('now')"
           ).bind(token).first() as any
-          if (!session) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
+          if (!mileDelSession) return Response.json({ success: false, error: 'Session expired' }, { status: 401, headers })
           await cloudflare.env.D1.prepare(
-            'DELETE FROM caregiver_mileage WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(cloudId), session.account_id).run()
+            'DELETE FROM caregiver_mileage WHERE id = ? AND caregiver_email = ?'
+          ).bind(Number(cloudId), mileDelSession.email).run()
           return Response.json({ success: true }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
@@ -6230,10 +6290,10 @@ Return a JSON object with these fields:
           if (!token) return Response.json({ error: 'token required' }, { status: 400 })
           const db = (cloudflare.env as any).D1
           const session = await db.prepare(
-            "SELECT caregiver_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
+            "SELECT account_id FROM caregiver_sessions WHERE token = ? AND expires_at > datetime('now')"
           ).bind(token).first() as any
           if (!session) return Response.json({ error: 'Invalid token' }, { status: 401 })
-          const cgId = String(session.caregiver_id)
+          const cgId = String(session.account_id)
           const sub = await db.prepare(
             'SELECT * FROM caregiver_subscriptions WHERE caregiver_id = ? ORDER BY created_at DESC LIMIT 1'
           ).bind(cgId).first() as any
