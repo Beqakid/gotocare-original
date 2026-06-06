@@ -4272,7 +4272,7 @@ Return a JSON object with these fields:
             env.D1.prepare('SELECT COUNT(*) as cnt, AVG(rating) as avg_r FROM caregiver_reviews WHERE caregiver_id = ?').bind(caregiverId).first(),
             env.D1.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status IN ('confirmed','completed')").bind(String(caregiverId)).first(),
             env.D1.prepare('SELECT fast_responder FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(caregiverId).first(),
-            env.D1.prepare('SELECT skills, bio, photo_url, hourly_rate, total_jobs FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first(),
+            env.D1.prepare('SELECT skills, bio, photo_url, hourly_rate FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first(),
           ])
 
           const ts: any = trustRow || {}
