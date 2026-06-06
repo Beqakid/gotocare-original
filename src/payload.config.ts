@@ -85,8 +85,10 @@ function _dispatchScore(cg: any, careType: string, dist: number): number {
 }
 const _ROUND_DURATION_MINS=[2,3,5,10];
 async function _findDispatchCgs(db: any, zip: string, careType: string, radius: number, limit: number): Promise<any[]> {
+  // Phase 14C: Added travel_radius_miles to SELECT
   const { results } = await db.prepare(`
     SELECT ca.id,ca.name,ca.zip_code,ca.skills,ca.hourly_rate,ca.photo_url,ca.city,ca.state,
+           COALESCE(ca.travel_radius_miles,10) as travel_radius_miles,
            COALESCE(cos.is_online,0) as is_online, COALESCE(cts.score,50) as trust_score,
            COALESCE(crm.avg_response_minutes,60) as avg_response_minutes, COALESCE(crm.avg_rating,4.0) as avg_rating
     FROM caregiver_accounts ca
@@ -95,7 +97,22 @@ async function _findDispatchCgs(db: any, zip: string, careType: string, radius: 
     LEFT JOIN caregiver_response_metrics crm ON crm.caregiver_id=ca.id
     WHERE ca.zip_code IS NOT NULL LIMIT 300
   `).all();
-  return results.map((cg: any)=>{const d=_getZipDist(zip,cg.zip_code||'');return{...cg,distance_miles:Math.round(d*10)/10,dispatch_score:_dispatchScore(cg,careType,d)};}).filter((cg:any)=>cg.distance_miles<=radius).sort((a:any,b:any)=>b.dispatch_score-a.dispatch_score).slice(0,limit);
+  // Phase 14C: Dual radius filter — caregiver must be within BOTH system dispatch radius
+  // AND their own personal travel radius preference (default 10 mi if not set)
+  return results
+    .map((cg: any) => {
+      const d = _getZipDist(zip, cg.zip_code || '');
+      const cgRadius = cg.travel_radius_miles || 10;
+      return { ...cg, distance_miles: Math.round(d*10)/10, travel_radius_miles: cgRadius, dispatch_score: _dispatchScore(cg, careType, d), matched_by_radius: true };
+    })
+    .filter((cg: any) => {
+      if (!cg.zip_code) return false; // edge case: missing_caregiver_location
+      const cgRadius = cg.travel_radius_miles || 10;
+      // Must satisfy system dispatch radius AND caregiver's personal travel preference
+      return cg.distance_miles <= Math.min(radius, cgRadius);
+    })
+    .sort((a: any, b: any) => b.dispatch_score - a.dispatch_score)
+    .slice(0, limit);
 }
 async function _signVAPIDJWT(endpoint: string, pubKey: string, privKeyB64: string): Promise<string> {
   const origin=new URL(endpoint).origin;
@@ -2453,9 +2470,12 @@ Return a JSON object with these fields:
           const specialty = (url.searchParams.get('specialty') || '').toLowerCase().trim()
           const limit = parseInt(url.searchParams.get('limit') || '50')
           // Query D1 caregiver_accounts — this is where marketplace caregivers self-register
+          // Phase 14C: Accept optional client zip for travel radius filtering
+          const clientZip = (url.searchParams.get('zip') || '').trim()
           const { results: rows } = await cloudflare.env.D1.prepare(
             `SELECT id, name, bio, photo_url, zip_code, city, state,
-                    languages, hourly_rate, skills, certifications, care_types, created_at
+                    languages, hourly_rate, skills, certifications, care_types, created_at,
+                    COALESCE(travel_radius_miles, 10) as travel_radius_miles
              FROM caregiver_accounts
              WHERE email_verified = 1
              ORDER BY created_at DESC
@@ -2477,7 +2497,16 @@ Return a JSON object with these fields:
             try { if (JSON.parse(cg.care_types || '[]').length > 0) s += 10 } catch {}
             return s
           }
-          const filteredRows = (rows || []).filter((cg: any) => calcProfileCompleteness(cg) >= 70)
+          const filteredRows = (rows || []).filter((cg: any) => {
+            if (calcProfileCompleteness(cg) < 70) return false;
+            // Phase 14C: Travel radius filter — only show caregivers who serve client's area
+            if (clientZip && cg.zip_code) {
+              const dist = _getZipDist(clientZip, cg.zip_code);
+              const cgRadius = cg.travel_radius_miles || 10;
+              if (dist > cgRadius) return false; // outside caregiver's travel radius
+            }
+            return true;
+          })
           const mapped = filteredRows.map((cg: any) => {
             const nameParts = (cg.name || 'Caregiver').trim().split(' ')
             const firstName = nameParts[0] || 'Caregiver'
@@ -2501,6 +2530,8 @@ Return a JSON object with these fields:
               else if (partial) matchScore = 86 + Math.floor(Math.random() * 6)
               else matchScore = 76 + Math.floor(Math.random() * 8)
             }
+            // Phase 14C: Calculate distance for display (private — never exposes caregiver address)
+            const distMiles = clientZip && cg.zip_code ? Math.round(_getZipDist(clientZip, cg.zip_code) * 10) / 10 : null;
             return {
               id: cg.id,
               firstName,
@@ -2520,6 +2551,9 @@ Return a JSON object with these fields:
               state: cg.state || '',
               zip_code: cg.zip_code || '',
               matchScore,
+              distanceMiles: distMiles,        // approx distance — no exact address exposed
+              servesYourArea: distMiles !== null ? true : null,
+              travelRadiusMiles: cg.travel_radius_miles || 10,
             }
           })
           mapped.sort((a: any, b: any) => b.matchScore - a.matchScore)
