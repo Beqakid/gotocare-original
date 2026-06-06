@@ -90,7 +90,7 @@ async function _findDispatchCgs(db: any, zip: string, careType: string, radius: 
     SELECT ca.id,ca.name,ca.zip_code,ca.skills,ca.hourly_rate,ca.photo_url,ca.city,ca.state,
            COALESCE(ca.travel_radius_miles,10) as travel_radius_miles,
            COALESCE(cos.is_online,0) as is_online, COALESCE(cts.score,50) as trust_score,
-           COALESCE(crm.avg_response_minutes,60) as avg_response_minutes, COALESCE(crm.avg_rating,4.0) as avg_rating
+           COALESCE(crm.avg_response_minutes,60) as avg_response_minutes
     FROM caregiver_accounts ca
     LEFT JOIN caregiver_online_status cos ON cos.caregiver_id=ca.id
     LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id=ca.id
