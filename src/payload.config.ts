@@ -95,7 +95,9 @@ async function _findDispatchCgs(db: any, zip: string, careType: string, radius: 
     LEFT JOIN caregiver_online_status cos ON cos.caregiver_id=ca.id
     LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id=ca.id
     LEFT JOIN caregiver_response_metrics crm ON crm.caregiver_id=ca.id
-    WHERE ca.zip_code IS NOT NULL LIMIT 300
+    WHERE ca.zip_code IS NOT NULL
+    AND COALESCE(ca.safety_status, 'active') NOT IN ('suspended','blocked','deactivated')
+    LIMIT 300
   `).all();
   // Phase 14C: Dual radius filter — caregiver must be within BOTH system dispatch radius
   // AND their own personal travel radius preference (default 10 mi if not set)
@@ -6787,5 +6789,243 @@ Return a JSON object with these fields:
         }
       },
     },
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 15C: Report a Concern — public endpoint (no auth required)
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      path: '/submit-concern',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS trust_safety_incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reporter_type TEXT DEFAULT 'guest', reporter_user_id TEXT, reporter_name TEXT, reporter_email TEXT,
+            related_caregiver_id TEXT, related_client_id TEXT, related_request_id TEXT,
+            related_booking_id TEXT, related_shift_id TEXT,
+            category TEXT NOT NULL, urgency TEXT DEFAULT 'medium', description TEXT NOT NULL,
+            contact_permission INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'new', assigned_admin TEXT, internal_notes TEXT, user_facing_note TEXT,
+            created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+          )`).run()
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS trust_safety_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, actor_email TEXT, action TEXT,
+            target_type TEXT, target_id TEXT, previous_value TEXT, new_value TEXT,
+            reason TEXT, ip_address TEXT, created_at TEXT DEFAULT (datetime('now'))
+          )`).run()
+          const body = await req.json()
+          const { reporter_type='guest', reporter_user_id='', reporter_name='', reporter_email='',
+                  related_caregiver_id='', related_client_id='', related_request_id='',
+                  related_booking_id='', related_shift_id='', category, urgency='medium',
+                  description, contact_permission=0 } = body
+          if (!category) return Response.json({ error: 'category required' }, { status: 400, headers })
+          if (!description || description.trim().length < 10) return Response.json({ error: 'description must be at least 10 characters' }, { status: 400, headers })
+          if (description.trim().length > 3000) return Response.json({ error: 'description too long (max 3000 characters)' }, { status: 400, headers })
+          const result = await env.D1.prepare(
+            `INSERT INTO trust_safety_incidents (reporter_type,reporter_user_id,reporter_name,reporter_email,related_caregiver_id,related_client_id,related_request_id,related_booking_id,related_shift_id,category,urgency,description,contact_permission)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).bind(reporter_type,reporter_user_id,reporter_name,reporter_email,related_caregiver_id,related_client_id,related_request_id,related_booking_id,related_shift_id,category,urgency,description.trim(),contact_permission?1:0).run() as any
+          const ip = req.headers?.get('CF-Connecting-IP') || 'unknown'
+          await env.D1.prepare(`INSERT INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,new_value,ip_address) VALUES (?,?,?,?,?,?)`)
+            .bind(reporter_email||'anonymous','incident_submitted','incident',String(result.meta?.last_row_id||''),category,ip).run()
+          return Response.json({ success: true, id: result.meta?.last_row_id }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 15D: Admin Incident Queue — list
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      path: '/admin-incidents',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('token') || url.searchParams.get('adminToken') || ''
+          if (!adminToken) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const sess = await env.D1.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS trust_safety_incidents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_type TEXT DEFAULT 'guest', reporter_user_id TEXT,
+            reporter_name TEXT, reporter_email TEXT, related_caregiver_id TEXT, related_client_id TEXT,
+            related_request_id TEXT, related_booking_id TEXT, related_shift_id TEXT,
+            category TEXT, urgency TEXT DEFAULT 'medium', description TEXT, contact_permission INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'new', assigned_admin TEXT, internal_notes TEXT, user_facing_note TEXT,
+            created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+          )`).run()
+          const filter = url.searchParams.get('filter') || 'all'
+          let where = ''
+          if (filter === 'new') where = "WHERE status = 'new'"
+          else if (filter === 'high') where = "WHERE urgency IN ('high','emergency')"
+          else if (filter === 'investigating') where = "WHERE status = 'investigating'"
+          else if (filter === 'waiting') where = "WHERE status = 'waiting_on_user'"
+          else if (filter === 'closed') where = "WHERE status = 'closed'"
+          else if (filter === 'escalated') where = "WHERE status = 'escalated'"
+          const { results } = await env.D1.prepare(
+            `SELECT id,reporter_type,reporter_name,reporter_email,related_caregiver_id,related_client_id,category,urgency,status,assigned_admin,created_at,updated_at FROM trust_safety_incidents ${where} ORDER BY created_at DESC LIMIT 200`
+          ).all()
+          return Response.json({ incidents: results || [] }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
+    // PHASE 15D: Admin Incident — detail
+    {
+      path: '/admin-incident-detail',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('token') || ''
+          if (!adminToken) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const sess = await env.D1.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const id = url.searchParams.get('id') || ''
+          if (!id) return Response.json({ error: 'id required' }, { status: 400, headers })
+          const incident = await env.D1.prepare('SELECT * FROM trust_safety_incidents WHERE id = ?').bind(id).first()
+          if (!incident) return Response.json({ error: 'Not found' }, { status: 404, headers })
+          try { await env.D1.prepare(`INSERT INTO trust_safety_audit_logs (actor_email,action,target_type,target_id) VALUES (?,?,?,?)`).bind(sess.email,'incident_viewed','incident',id).run() } catch(_) {}
+          let auditLogs: any[] = []
+          try { const r = await env.D1.prepare('SELECT * FROM trust_safety_audit_logs WHERE target_type = ? AND target_id = ? ORDER BY created_at DESC LIMIT 50').bind('incident',id).all(); auditLogs = r.results || [] } catch(_) {}
+          return Response.json({ incident, auditLogs }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
+    // PHASE 15D: Admin Incident — action (update status, notes, assign)
+    {
+      path: '/admin-incident-action',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('token') || ''
+          if (!adminToken) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const sess = await env.D1.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const { id, action, new_status, internal_notes, user_facing_note, assigned_admin, reason } = await req.json()
+          if (!id) return Response.json({ error: 'id required' }, { status: 400, headers })
+          const prev = await env.D1.prepare('SELECT status FROM trust_safety_incidents WHERE id = ?').bind(id).first() as any
+          if (!prev) return Response.json({ error: 'Incident not found' }, { status: 404, headers })
+          const updates: string[] = ["updated_at = datetime('now')"]
+          const binds: any[] = []
+          if (new_status) { updates.push('status = ?'); binds.push(new_status) }
+          if (internal_notes !== undefined) { updates.push('internal_notes = ?'); binds.push(internal_notes) }
+          if (user_facing_note !== undefined) { updates.push('user_facing_note = ?'); binds.push(user_facing_note) }
+          if (assigned_admin !== undefined) { updates.push('assigned_admin = ?'); binds.push(assigned_admin) }
+          binds.push(id)
+          await env.D1.prepare(`UPDATE trust_safety_incidents SET ${updates.join(', ')} WHERE id = ?`).bind(...binds).run()
+          const auditAction = action || (new_status ? 'incident_status_changed' : internal_notes !== undefined ? 'incident_note_added' : 'incident_updated')
+          try { await env.D1.prepare(`INSERT INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,previous_value,new_value,reason) VALUES (?,?,?,?,?,?,?)`).bind(sess.email,auditAction,'incident',String(id),prev.status||'',new_status||'',reason||'').run() } catch(_) {}
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 15E: Admin — Get/Set user safety status
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      path: '/admin-safety-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('token') || ''
+          if (!adminToken) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const sess = await env.D1.prepare('SELECT ca.is_admin FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS user_safety_status (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, user_type TEXT NOT NULL, status TEXT DEFAULT 'active', reason TEXT, updated_by TEXT, updated_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id,user_type))`).run()
+          const userType = url.searchParams.get('user_type') || ''
+          const userId = url.searchParams.get('user_id') || ''
+          if (!userType || !userId) return Response.json({ error: 'user_type and user_id required' }, { status: 400, headers })
+          const row = await env.D1.prepare('SELECT * FROM user_safety_status WHERE user_id = ? AND user_type = ?').bind(userId,userType).first()
+          return Response.json({ status: row || { user_id: userId, user_type: userType, status: 'active' } }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+    {
+      path: '/admin-safety-status',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const adminToken = url.searchParams.get('token') || ''
+          if (!adminToken) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const sess = await env.D1.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(adminToken).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          const { user_id, user_type, status, reason } = await req.json()
+          if (!user_id || !user_type || !status) return Response.json({ error: 'user_id, user_type, status required' }, { status: 400, headers })
+          const validStatuses = ['active','under_review','limited','suspended','blocked','deactivated']
+          if (!validStatuses.includes(status)) return Response.json({ error: `Invalid status. Must be one of: ${validStatuses.join(', ')}` }, { status: 400, headers })
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS user_safety_status (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, user_type TEXT NOT NULL, status TEXT DEFAULT 'active', reason TEXT, updated_by TEXT, updated_at TEXT DEFAULT (datetime('now')), UNIQUE(user_id,user_type))`).run()
+          const prev = await env.D1.prepare('SELECT status FROM user_safety_status WHERE user_id = ? AND user_type = ?').bind(user_id,user_type).first() as any
+          await env.D1.prepare(`INSERT INTO user_safety_status (user_id,user_type,status,reason,updated_by,updated_at) VALUES (?,?,?,?,?,datetime('now')) ON CONFLICT(user_id,user_type) DO UPDATE SET status=excluded.status,reason=excluded.reason,updated_by=excluded.updated_by,updated_at=excluded.updated_at`).bind(user_id,user_type,status,reason||'',sess.email).run()
+          if (user_type === 'caregiver') {
+            try { await env.D1.prepare("ALTER TABLE caregiver_accounts ADD COLUMN safety_status TEXT DEFAULT 'active'").run() } catch(_) {}
+            await env.D1.prepare('UPDATE caregiver_accounts SET safety_status = ? WHERE id = ?').bind(status,user_id).run()
+          }
+          if (user_type === 'client') {
+            try { await env.D1.prepare("ALTER TABLE client_accounts ADD COLUMN safety_status TEXT DEFAULT 'active'").run() } catch(_) {}
+            await env.D1.prepare('UPDATE client_accounts SET safety_status = ? WHERE id = ?').bind(status,user_id).run()
+          }
+          try { await env.D1.prepare(`INSERT OR IGNORE INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,previous_value,new_value,reason) VALUES (?,?,?,?,?,?,?)`).bind(sess.email,`${user_type}_status_changed`,user_type,String(user_id),prev?.status||'active',status,reason||'').run() } catch(_) {}
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 15F: Policy Acceptance — record and retrieve
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      path: '/policy-accept',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          await env.D1.prepare(`CREATE TABLE IF NOT EXISTS policy_acceptance (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, user_type TEXT NOT NULL, policy_type TEXT NOT NULL, version TEXT DEFAULT '1.0', accepted_at TEXT DEFAULT (datetime('now')), ip_address TEXT, user_agent TEXT)`).run()
+          const { user_id, user_type, policy_type, version='1.0' } = await req.json()
+          if (!user_id || !user_type || !policy_type) return Response.json({ error: 'user_id, user_type, policy_type required' }, { status: 400, headers })
+          const ip = req.headers?.get('CF-Connecting-IP') || 'unknown'
+          const ua = req.headers?.get('User-Agent') || ''
+          await env.D1.prepare('INSERT INTO policy_acceptance (user_id,user_type,policy_type,version,ip_address,user_agent) VALUES (?,?,?,?,?,?)').bind(user_id,user_type,policy_type,version,ip,ua).run()
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+    {
+      path: '/policy-accept',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const user_id = url.searchParams.get('user_id') || ''
+          const user_type = url.searchParams.get('user_type') || ''
+          if (!user_id || !user_type) return Response.json({ error: 'user_id and user_type required' }, { status: 400, headers })
+          try {
+            const { results } = await env.D1.prepare('SELECT policy_type,version,accepted_at FROM policy_acceptance WHERE user_id = ? AND user_type = ? ORDER BY accepted_at DESC').bind(user_id,user_type).all()
+            return Response.json({ acceptances: results || [] }, { headers })
+          } catch(_) { return Response.json({ acceptances: [] }, { headers }) }
+        } catch (e: any) { return Response.json({ error: e.message }, { status: 500, headers }) }
+      },
+    },
+
   ],
 })
