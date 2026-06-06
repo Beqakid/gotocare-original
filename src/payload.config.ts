@@ -4271,7 +4271,7 @@ Return a JSON object with these fields:
             env.D1.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(caregiverId).first(),
             env.D1.prepare('SELECT COUNT(*) as cnt, AVG(rating) as avg_r FROM caregiver_reviews WHERE caregiver_id = ?').bind(caregiverId).first(),
             env.D1.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status IN ('confirmed','completed')").bind(String(caregiverId)).first(),
-            env.D1.prepare('SELECT fast_responder FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(caregiverId).first(),
+            env.D1.prepare('SELECT avg_response_minutes, repeat_bookings, completed_shifts FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(caregiverId).first(),
             env.D1.prepare('SELECT skills, bio, photo_url, hourly_rate FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first(),
           ])
 
@@ -4280,8 +4280,11 @@ Return a JSON object with these fields:
           const bg: any = bgRow || {}
           const reviewCount = Number((reviewRow as any)?.cnt || 0)
           const avgRating = (reviewRow as any)?.avg_r ? parseFloat(Number((reviewRow as any).avg_r).toFixed(1)) : null
-          const sessionCount = Number((sessionRow as any)?.cnt || 0)
-          const fastResponder = !!(metricsRow as any)?.fast_responder
+          const sessionCount = Math.max(
+            Number((sessionRow as any)?.cnt || 0),
+            Number((metricsRow as any)?.completed_shifts || 0)
+          )
+          const fastResponder = (metricsRow as any)?.avg_response_minutes != null && Number((metricsRow as any).avg_response_minutes) <= 60
           const acct: any = acctRow || {}
 
           // Profile completeness (simple heuristic)
