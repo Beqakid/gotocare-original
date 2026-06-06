@@ -278,6 +278,7 @@ async function _ensureVerificationTables(db: any): Promise<void> {
     'ALTER TABLE caregiver_trust_scores ADD COLUMN cna_verified INTEGER DEFAULT 0',
     'ALTER TABLE caregiver_trust_scores ADD COLUMN updated_at TEXT',
     'ALTER TABLE verification_audit_logs ADD COLUMN actor_email TEXT',
+    'ALTER TABLE caregiver_accounts ADD COLUMN travel_radius_miles INTEGER DEFAULT 10',
   ]
   for (const statement of statements) {
     try { await db.prepare(statement).run() } catch (_) {}
@@ -3526,7 +3527,7 @@ Return a JSON object with these fields:
           if (!session) return Response.json({ error: 'Session expired. Please sign in again.' }, { status: 401 })
 
           const account = await cloudflare.env.D1.prepare(
-            'SELECT id, email, name, zip_code, care_types, phone, bio, photo_url, setup_complete, city, state, languages, hourly_rate, skills, certifications FROM caregiver_accounts WHERE id = ?'
+            'SELECT id, email, name, zip_code, care_types, phone, bio, photo_url, setup_complete, city, state, languages, hourly_rate, skills, certifications, travel_radius_miles FROM caregiver_accounts WHERE id = ?'
           ).bind(session.account_id).first()
           if (!account) return Response.json({ error: 'Account not found' }, { status: 404 })
 
@@ -3576,6 +3577,7 @@ Return a JSON object with these fields:
               completenessScore,
               missingFields,
               isVisibleInSearch: completenessScore >= 70,
+              travelRadiusMiles: (account as any).travel_radius_miles || 10,
             },
           })
         } catch (error) {
@@ -3592,7 +3594,7 @@ Return a JSON object with these fields:
       handler: async (req) => {
         try {
           const body = await req.json()
-          const { token, name, phone, city, state, bio, hourlyRate, languages, skills, certifications, photoUrl } = body
+          const { token, name, phone, city, state, bio, hourlyRate, languages, skills, certifications, photoUrl, travelRadiusMiles } = body
           if (!token) return Response.json({ error: 'token required' }, { status: 401 })
 
           const session = await cloudflare.env.D1.prepare(
@@ -3613,6 +3615,7 @@ Return a JSON object with these fields:
           if (skills !== undefined)        { updates.push('skills = ?');        values.push(JSON.stringify(skills)) }
           if (certifications !== undefined){ updates.push('certifications = ?');values.push(JSON.stringify(certifications)) }
           if (photoUrl !== undefined)      { updates.push('photo_url = ?');     values.push(photoUrl) }
+          if (travelRadiusMiles !== undefined) { updates.push('travel_radius_miles = ?'); values.push(Math.min(50, Math.max(5, Number(travelRadiusMiles) || 10))) }
 
           if (updates.length === 0) return Response.json({ success: true, message: 'Nothing to update' })
 
