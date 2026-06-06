@@ -4247,6 +4247,160 @@ Return a JSON object with these fields:
         }
       },
     },
+    // ====== CGP TRUST STATUS — backend-verified trust checklist ======
+    {
+      path: '/cgp-trust-status',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const env = cloudflare.env as any
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const sess = await env.D1.prepare(
+            'SELECT cs.account_id FROM caregiver_sessions cs WHERE cs.token = ?'
+          ).bind(token).first() as any
+          if (!sess) return Response.json({ error: 'Unauthorized' }, { status: 401, headers })
+          const caregiverId = sess.account_id
+
+          // Parallel D1 queries
+          const [trustRow, verRow, bgRow, reviewRow, sessionRow, metricsRow, acctRow] = await Promise.all([
+            env.D1.prepare('SELECT * FROM caregiver_trust_scores WHERE caregiver_id = ?').bind(caregiverId).first(),
+            env.D1.prepare('SELECT id, doc_type, status, submitted_at, rejection_reason, admin_notes, file_name FROM caregiver_verifications WHERE caregiver_id = ? ORDER BY submitted_at DESC').bind(caregiverId).all(),
+            env.D1.prepare('SELECT status FROM caregiver_background_checks WHERE caregiver_id = ?').bind(caregiverId).first(),
+            env.D1.prepare('SELECT COUNT(*) as cnt, AVG(rating) as avg_r FROM caregiver_reviews WHERE caregiver_id = ?').bind(caregiverId).first(),
+            env.D1.prepare("SELECT COUNT(*) as cnt FROM caregiver_bookings WHERE caregiver_id = ? AND status IN ('confirmed','completed')").bind(String(caregiverId)).first(),
+            env.D1.prepare('SELECT fast_responder FROM caregiver_response_metrics WHERE caregiver_id = ?').bind(caregiverId).first(),
+            env.D1.prepare('SELECT skills, bio, photo_url, hourly_rate, total_jobs FROM caregiver_accounts WHERE id = ?').bind(caregiverId).first(),
+          ])
+
+          const ts: any = trustRow || {}
+          const verifications: any[] = (verRow as any)?.results || []
+          const bg: any = bgRow || {}
+          const reviewCount = Number((reviewRow as any)?.cnt || 0)
+          const avgRating = (reviewRow as any)?.avg_r ? parseFloat(Number((reviewRow as any).avg_r).toFixed(1)) : null
+          const sessionCount = Number((sessionRow as any)?.cnt || 0)
+          const fastResponder = !!(metricsRow as any)?.fast_responder
+          const acct: any = acctRow || {}
+
+          // Profile completeness (simple heuristic)
+          let profileComplete = 0
+          if (acct.bio && String(acct.bio).trim().length >= 20) profileComplete++
+          if (acct.photo_url) profileComplete++
+          if (acct.hourly_rate && Number(acct.hourly_rate) > 0) profileComplete++
+          try { const sk = JSON.parse(acct.skills || '[]'); if (sk.length >= 3) profileComplete++ } catch {}
+          const profileDone = profileComplete >= 3
+
+          // Helper: map verification status from doc array
+          const mapIdStatus = (adminVerified: boolean, docs: any[]): string => {
+            if (adminVerified) return 'approved'
+            if (!docs.length) return 'not_started'
+            const latest = docs[0]
+            const s = String(latest?.status || 'pending').toLowerCase()
+            if (s === 'verified' || s === 'approved') return 'approved'
+            if (s === 'rejected' || s === 'needs_more_info') return 'rejected'
+            return 'submitted'
+          }
+
+          const idDocs = verifications.filter((v: any) => {
+            const dt = String(v.doc_type || '').toLowerCase()
+            return dt.includes('id') || dt.includes('license') || dt.includes('passport') || dt.includes('drivers') || dt.includes('state_id') || dt.includes('government')
+          })
+          const cprDocs = verifications.filter((v: any) => {
+            const dt = String(v.doc_type || '').toLowerCase()
+            return dt.includes('cpr') || dt.includes('first_aid') || dt.includes('first aid')
+          })
+          const cnaDocs = verifications.filter((v: any) => {
+            const dt = String(v.doc_type || '').toLowerCase()
+            return dt.includes('cna') || dt.includes('hha') || dt.includes('lvn') || dt.includes('lpn') || dt.includes('rn')
+          })
+
+          const idStatus = mapIdStatus(!!ts.id_verified, idDocs)
+          const cprStatus = mapIdStatus(!!ts.cpr_certified, cprDocs)
+          const cnaStatus = mapIdStatus(!!ts.cna_verified, cnaDocs)
+          const bgStatus = (() => {
+            if (ts.background_checked) return 'approved'
+            const s = String(bg.status || 'not_started').toLowerCase()
+            if (s === 'clear' || s === 'verified' || s === 'approved') return 'approved'
+            if (s === 'pending' || s === 'in_progress' || s === 'submitted') return 'submitted'
+            return 'not_started'
+          })()
+
+          const getRejectionReason = (docs: any[]): string | null => {
+            const latest = docs[0]
+            if (!latest) return null
+            const s = String(latest.status || '').toLowerCase()
+            if (s !== 'rejected' && s !== 'needs_more_info') return null
+            return latest.admin_notes || latest.rejection_reason || 'Please resubmit with a clearer document.'
+          }
+
+          // Compute score
+          const checklist = [
+            { key: 'profile_complete', label: 'Profile Complete', status: profileDone ? 'complete' : 'not_started', points: 10, progress: null, rejection_reason: null },
+            { key: 'identity_verified', label: 'Identity Verification', status: idStatus, points: 20, progress: null, rejection_reason: getRejectionReason(idDocs) },
+            { key: 'background_check', label: 'Background Check', status: bgStatus, points: 20, progress: null, rejection_reason: null },
+            { key: 'cpr_certification', label: 'CPR Certification', status: cprStatus, points: 15, progress: null, rejection_reason: getRejectionReason(cprDocs) },
+            { key: 'cna_hha', label: 'CNA / HHA Verification', status: cnaStatus, points: 10, progress: null, rejection_reason: getRejectionReason(cnaDocs) },
+            { key: 'completed_shifts', label: '5+ Completed Shifts', status: sessionCount >= 5 ? 'earned' : 'not_earned', points: 10, progress: `${Math.min(sessionCount, 5)}/5`, rejection_reason: null },
+            { key: 'fast_responder', label: 'Fast Responder', status: fastResponder ? 'earned' : 'not_earned', points: 5, progress: null, rejection_reason: null },
+            { key: 'repeat_clients', label: 'Repeat Clients', status: 'not_earned', points: 5, progress: null, rejection_reason: null },
+            { key: 'five_star_avg', label: '5-Star Average', status: avgRating && avgRating >= 5.0 ? 'earned' : 'not_earned', points: 5, progress: avgRating ? `${avgRating}★` : null, rejection_reason: null },
+          ]
+
+          const score = checklist.reduce((sum: number, item: any) => {
+            if (['approved','complete','earned'].includes(item.status)) return sum + item.points
+            return sum
+          }, 0)
+
+          const tier = score >= 80 ? 'Platinum' : score >= 60 ? 'Gold' : score >= 40 ? 'Silver' : score >= 20 ? 'Verified' : 'Basic'
+
+          // Next best action
+          let next_action: any = null
+          if (idStatus === 'not_started') {
+            next_action = { type: 'upload_id', status: 'not_started', label: 'Verify Identity', cta: 'Upload ID', points: 20, description: 'Upload a photo ID to verify your identity. Accepted: Driver License, State ID, or Passport.' }
+          } else if (idStatus === 'submitted') {
+            next_action = { type: 'id_under_review', status: 'submitted', label: 'Identity Verification Under Review', cta: null, points: 20, description: 'Your ID is being reviewed by the Carehia team. This usually takes 1–2 business days.' }
+          } else if (idStatus === 'rejected') {
+            next_action = { type: 'resubmit_id', status: 'rejected', label: 'Resubmit Identity Verification', cta: 'Resubmit ID', points: 20, description: getRejectionReason(idDocs) || 'Your ID submission needs attention. Please resubmit with a clearer photo.' }
+          } else if (bgStatus === 'not_started') {
+            next_action = { type: 'background_check', status: 'not_started', label: 'Start Background Check', cta: 'Coming Soon', points: 20, description: 'Background checks are coming soon. Carehia will never start this step without your permission.' }
+          } else if (bgStatus === 'submitted') {
+            next_action = { type: 'bg_under_review', status: 'submitted', label: 'Background Check Under Review', cta: null, points: 20, description: 'Your background check is being processed. This can take 3–5 business days.' }
+          } else {
+            next_action = { type: 'add_certification', status: 'not_started', label: 'Add Certification Proof', cta: 'Add Proof', points: 15, description: 'Add CPR, CNA, training certificates, or other credentials to strengthen your profile.' }
+          }
+
+          // Badges
+          const earnedBadgeNames: string[] = []
+          if (profileDone) earnedBadgeNames.push('Profile Complete')
+          if (idStatus === 'approved') earnedBadgeNames.push('Identity Verified')
+          if (bgStatus === 'approved') earnedBadgeNames.push('Background Checked')
+          if (cprStatus === 'approved') earnedBadgeNames.push('CPR Certified')
+          if (fastResponder) earnedBadgeNames.push('Fast Responder')
+          if (avgRating && avgRating >= 5.0) earnedBadgeNames.push('5-Star Caregiver')
+          const allBadges = ['Profile Complete', 'Identity Verified', 'Background Checked', 'CPR Certified', 'Fast Responder', '5-Star Caregiver']
+          const nextBadge = allBadges.find(b => !earnedBadgeNames.includes(b)) || null
+
+          return Response.json({
+            score,
+            tier,
+            next_action,
+            checklist,
+            certifications: verifications.map((v: any) => ({
+              id: v.id, doc_type: v.doc_type, file_name: v.file_name,
+              status: v.status || 'pending', submitted_at: v.submitted_at,
+              rejection_reason: v.admin_notes || v.rejection_reason,
+            })),
+            reputation: { rating: avgRating, reviews: reviewCount, sessions: sessionCount },
+            badges: { earned: earnedBadgeNames, next: nextBadge, total_earned: earnedBadgeNames.length },
+          }, { headers })
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers })
+        }
+      },
+    },
+
     {
       path: '/caregiver-profile-docs',
       method: 'get',
