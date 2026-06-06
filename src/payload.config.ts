@@ -2885,7 +2885,7 @@ Return a JSON object with these fields:
           if (itemType === 'interview') {
             const booking = await db.prepare(
               'SELECT id, status FROM caregiver_bookings WHERE id = ? AND caregiver_id = ?'
-            ).bind(Number(itemId), cgSess.account_id).first() as any
+            ).bind(Number(itemId), String(cgSess.account_id)).first() as any
             if (!booking) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
             const status = String(booking.status || '').toLowerCase()
             if (!_HIDEABLE_INTERVIEW_STATUSES.has(status)) {
@@ -2893,13 +2893,13 @@ Return a JSON object with these fields:
             }
             await db.prepare(
               "UPDATE caregiver_bookings SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
-            ).bind(hideReason, Number(itemId), cgSess.account_id).run()
+            ).bind(hideReason, Number(itemId), String(cgSess.account_id)).run()
             return Response.json({ success: true, hidden: true, itemId, itemType }, { headers })
           }
 
           const agreement = await db.prepare(
             'SELECT id, status FROM hire_agreements WHERE id = ? AND caregiver_id = ?'
-          ).bind(Number(itemId), cgSess.account_id).first() as any
+          ).bind(Number(itemId), String(cgSess.account_id)).first() as any
           if (!agreement) return Response.json({ success: false, error: 'Item not found' }, { status: 404, headers })
           const status = String(agreement.status || '').toLowerCase()
           if (!_HIDEABLE_HIRE_OFFER_STATUSES.has(status)) {
@@ -2907,7 +2907,7 @@ Return a JSON object with these fields:
           }
           await db.prepare(
             "UPDATE hire_agreements SET caregiver_hidden = 1, caregiver_hidden_at = datetime('now'), caregiver_hidden_reason = ? WHERE id = ? AND caregiver_id = ?"
-          ).bind(hideReason, Number(itemId), cgSess.account_id).run()
+          ).bind(hideReason, Number(itemId), String(cgSess.account_id)).run()
           return Response.json({ success: true, hidden: true, itemId, itemType }, { headers })
         } catch (error) {
           return Response.json({ success: false, error: String(error) }, { status: 500, headers })
