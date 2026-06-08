@@ -2329,13 +2329,34 @@ Return a JSON object with these fields:
           const now = new Date()
           const periodEnd = sub.current_period_end ? new Date(sub.current_period_end.replace(' ', 'T')) : null
           const isValid = !periodEnd || periodEnd > now
+
+          // Phase 19b fix: count unlocks from client_contact_unlocks table (not a column on client_subscriptions)
+          let contactUnlocksUsed = 0
+          try {
+            await cloudflare.env.D1.prepare(
+              `CREATE TABLE IF NOT EXISTS client_contact_unlocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_email TEXT NOT NULL,
+                caregiver_id TEXT NOT NULL,
+                subscription_id INTEGER,
+                unlocked_at TEXT DEFAULT (datetime('now')),
+                UNIQUE(client_email, caregiver_id)
+              )`
+            ).run()
+            const month = now.toISOString().slice(0, 7)
+            const countRow = await cloudflare.env.D1.prepare(
+              "SELECT COUNT(*) as cnt FROM client_contact_unlocks WHERE client_email = ? AND strftime('%Y-%m', unlocked_at) = ?"
+            ).bind(email.toLowerCase(), month).first() as any
+            contactUnlocksUsed = countRow?.cnt || 0
+          } catch (_e) { /* table may not exist yet */ }
+
           return Response.json({
             subscribed: isValid,
             plan: sub.plan,
             status: sub.status,
             currentPeriodEnd: sub.current_period_end,
             stripeCustomerId: sub.stripe_customer_id || null,
-            contactUnlocksUsed: sub.contact_unlocks_used || 0,
+            contactUnlocksUsed,
           })
         } catch (error) {
           return Response.json({ subscribed: false, error: String(error) }, { status: 500 })
