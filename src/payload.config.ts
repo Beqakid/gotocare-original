@@ -3526,6 +3526,11 @@ Return a JSON object with these fields:
           const passwordHash = Array.from(new Uint8Array(hashBuffer)).map((b) => b.toString(16).padStart(2, '0')).join('')
           if (passwordHash !== account.password_hash) { await recordCgLoginFail(); return Response.json({ error: 'Invalid email or password' }, { status: 401 }) }
 
+
+          // Phase 20 Bug #1: Enforce email verification before login
+          if (account.email_verified !== 1 && account.email_verified !== true) {
+            return Response.json({ error: 'Please verify your email before signing in. Check your inbox for a verification link.' }, { status: 403 })
+          }
           const token = crypto.randomUUID() + '-' + crypto.randomUUID()
           await cloudflare.env.D1.prepare(
             "INSERT INTO caregiver_sessions (token, account_id, expires_at) VALUES (?, ?, datetime('now', '+30 days'))"
