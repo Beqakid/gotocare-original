@@ -1863,28 +1863,28 @@ h1{color:#ef4444;margin-top:80px}p{color:#64748b}</style></head>
               const clientEmail = session.metadata?.client_email || session.customer_email || ''
               const plan = session.metadata?.plan || 'essential'
               if (clientEmail) {
-                await (req as any).payload.db.execute({
-                  sql: 'INSERT INTO client_subscriptions (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                  values: [
-                    clientEmail.toLowerCase(),
-                    plan,
-                    session.customer || '',
-                    session.subscription || '',
-                    session.id,
-                    'active',
-                    new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-                  ],
-                })
+                // Phase 19 fix: use cloudflare.env.D1 directly (payload.db.execute is broken on D1)
+                await cloudflare.env.D1.prepare(
+                  'INSERT OR REPLACE INTO client_subscriptions (email, plan, stripe_customer_id, stripe_subscription_id, stripe_session_id, status, current_period_end) VALUES (?, ?, ?, ?, ?, ?, ?)'
+                ).bind(
+                  clientEmail.toLowerCase(),
+                  plan,
+                  session.customer || '',
+                  session.subscription || '',
+                  session.id,
+                  'active',
+                  new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+                ).run()
               }
             }
           }
           if (event.type === 'customer.subscription.deleted' || event.type === 'customer.subscription.updated') {
             const sub = event.data.object
             if (sub.status === 'canceled' || sub.status === 'unpaid') {
-              await (req as any).payload.db.execute({
-                sql: "UPDATE client_subscriptions SET status = 'cancelled', updated_at = datetime('now') WHERE stripe_subscription_id = ?",
-                values: [sub.id],
-              })
+              // Phase 19 fix: use D1 directly
+              await cloudflare.env.D1.prepare(
+                "UPDATE client_subscriptions SET status = 'cancelled', updated_at = datetime('now') WHERE stripe_subscription_id = ?"
+              ).bind(sub.id).run()
             }
           }
           return Response.json({ received: true })
@@ -2320,23 +2320,21 @@ Return a JSON object with these fields:
           const email = url.searchParams.get('email')
           if (!email) return Response.json({ subscribed: false, error: 'email required' }, { status: 400 })
 
-          const db = (req as any).payload?.db?.drizzle || (globalThis as any).D1
-          // Use raw D1 query via the adapter
-          const result = await (req as any).payload.db.execute({
-            sql: 'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
-            values: [email.toLowerCase(), 'active'],
-          })
-          const sub = result?.rows?.[0] || null
+          // Phase 19 fix: use cloudflare.env.D1 directly (payload.db.execute is broken on D1)
+          const sub = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(email.toLowerCase(), 'active').first() as any
           if (!sub) return Response.json({ subscribed: false, plan: null })
           // Check if subscription is still valid
           const now = new Date()
-          const periodEnd = sub.current_period_end ? new Date(sub.current_period_end) : null
+          const periodEnd = sub.current_period_end ? new Date(sub.current_period_end.replace(' ', 'T')) : null
           const isValid = !periodEnd || periodEnd > now
           return Response.json({
             subscribed: isValid,
             plan: sub.plan,
             status: sub.status,
             currentPeriodEnd: sub.current_period_end,
+            stripeCustomerId: sub.stripe_customer_id || null,
             contactUnlocksUsed: sub.contact_unlocks_used || 0,
           })
         } catch (error) {
@@ -2375,6 +2373,47 @@ Return a JSON object with these fields:
         }
       },
     },
+
+    // ====== CLIENT BILLING PORTAL (Phase 19) ======
+    {
+      path: '/create-client-billing-portal',
+      method: 'post',
+      handler: async (req) => {
+        try {
+          const body = await req.json()
+          const { email } = body
+          if (!email) return Response.json({ error: 'email required' }, { status: 400 })
+
+          // Look up Stripe customer ID from subscription
+          const sub = await cloudflare.env.D1.prepare(
+            'SELECT stripe_customer_id FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(email.toLowerCase(), 'active').first() as any
+
+          if (!sub?.stripe_customer_id) {
+            return Response.json({ error: 'No active subscription with Stripe customer found. Please contact support.' }, { status: 404 })
+          }
+
+          const stripeKey = cloudflare.env.STRIPE_SECRET_KEY
+          const params = new URLSearchParams({
+            'customer': sub.stripe_customer_id,
+            'return_url': 'https://app.carehia.com/#profile',
+          })
+          const stripeRes = await fetch('https://api.stripe.com/v1/billing_portal/sessions', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${stripeKey}`,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: params.toString(),
+          })
+          const session = await stripeRes.json() as any
+          if (!session.url) return Response.json({ error: 'Could not create billing portal session', details: session }, { status: 500 })
+          return Response.json({ success: true, url: session.url })
+        } catch (error) {
+          return Response.json({ error: String(error) }, { status: 500 })
+        }
+      },
+    },
     // ====== UNLOCK CAREGIVER CONTACT ======
     {
       path: '/unlock-contact',
@@ -2389,47 +2428,58 @@ Return a JSON object with these fields:
           const email = clientSess.email  // always use authenticated session email
           if (!caregiverId) return Response.json({ error: 'caregiverId required' }, { status: 400 })
 
+          // Phase 19 fix: use cloudflare.env.D1 directly
+          // Auto-create contact_unlocks table if not exists
+          await cloudflare.env.D1.prepare(
+            `CREATE TABLE IF NOT EXISTS client_contact_unlocks (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              client_email TEXT NOT NULL,
+              caregiver_id TEXT NOT NULL,
+              subscription_id INTEGER,
+              unlocked_at TEXT DEFAULT (datetime('now')),
+              UNIQUE(client_email, caregiver_id)
+            )`
+          ).run()
+
           // Check subscription
-          const subResult = await (req as any).payload.db.execute({
-            sql: 'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
-            values: [email.toLowerCase(), 'active'],
-          })
-          const sub = subResult?.rows?.[0]
+          const sub = await cloudflare.env.D1.prepare(
+            'SELECT * FROM client_subscriptions WHERE email = ? AND status = ? ORDER BY created_at DESC LIMIT 1'
+          ).bind(email.toLowerCase(), 'active').first() as any
           if (!sub) return Response.json({ error: 'No active subscription', requiresSubscription: true }, { status: 403 })
 
           // Check if already unlocked
-          const unlockCheck = await (req as any).payload.db.execute({
-            sql: 'SELECT id FROM client_contact_unlocks WHERE client_email = ? AND caregiver_id = ?',
-            values: [email.toLowerCase(), caregiverId],
-          })
-          if (unlockCheck?.rows?.length > 0) {
-            // Already unlocked — get caregiver contact info
-          } else {
+          const existing = await cloudflare.env.D1.prepare(
+            'SELECT id FROM client_contact_unlocks WHERE client_email = ? AND caregiver_id = ?'
+          ).bind(email.toLowerCase(), String(caregiverId)).first()
+
+          if (!existing) {
             // Check monthly limit for essential plan
             if (sub.plan === 'essential') {
               const month = new Date().toISOString().slice(0, 7)
-              const countResult = await (req as any).payload.db.execute({
-                sql: "SELECT COUNT(*) as cnt FROM client_contact_unlocks WHERE client_email = ? AND strftime('%Y-%m', unlocked_at) = ?",
-                values: [email.toLowerCase(), month],
-              })
-              const count = countResult?.rows?.[0]?.cnt || 0
+              const countRow = await cloudflare.env.D1.prepare(
+                "SELECT COUNT(*) as cnt FROM client_contact_unlocks WHERE client_email = ? AND strftime('%Y-%m', unlocked_at) = ?"
+              ).bind(email.toLowerCase(), month).first() as any
+              const count = countRow?.cnt || 0
               if (count >= 5) return Response.json({ error: 'Monthly unlock limit reached. Upgrade to Family plan for unlimited unlocks.', limitReached: true }, { status: 403 })
             }
             // Record the unlock
-            await (req as any).payload.db.execute({
-              sql: 'INSERT INTO client_contact_unlocks (client_email, caregiver_id, subscription_id) VALUES (?, ?, ?)',
-              values: [email.toLowerCase(), caregiverId, sub.id],
-            })
+            await cloudflare.env.D1.prepare(
+              'INSERT INTO client_contact_unlocks (client_email, caregiver_id, subscription_id) VALUES (?, ?, ?)'
+            ).bind(email.toLowerCase(), String(caregiverId), sub.id || 0).run()
           }
 
-          // Get caregiver contact info
-          const caregiver = await req.payload.findByID({ collection: 'caregivers', id: caregiverId, depth: 0, overrideAccess: true })
+          // Phase 19 fix: use D1 caregiver_accounts instead of Payload collection
+          const caregiver = await cloudflare.env.D1.prepare(
+            'SELECT id, name, email, phone FROM caregiver_accounts WHERE id = ?'
+          ).bind(String(caregiverId)).first() as any
+          if (!caregiver) return Response.json({ error: 'Caregiver not found' }, { status: 404 })
+
           return Response.json({
             success: true,
             contact: {
-              phone: caregiver.phone || caregiver.phoneNumber || '',
+              phone: caregiver.phone || '',
               email: caregiver.email || '',
-              name: `${caregiver.firstName} ${caregiver.lastName}`,
+              name: caregiver.name || '',
             },
           })
         } catch (error) {
@@ -2613,8 +2663,8 @@ Return a JSON object with these fields:
             'line_items[0][price_data][unit_amount]': String(total),
             'line_items[0][quantity]': '1',
             'customer_email': clientEmail || '',
-            'success_url': 'https://gotocare-client-portal.pages.dev/?booking=success',
-            'cancel_url': 'https://gotocare-client-portal.pages.dev/?booking=cancelled',
+            'success_url': 'https://app.carehia.com/?booking=success#bookings',
+            'cancel_url': 'https://app.carehia.com/?booking=cancelled#findcare',
             'metadata[caregiver_id]': String(caregiverId || ''),
             'metadata[type]': 'marketplace_booking',
           })
