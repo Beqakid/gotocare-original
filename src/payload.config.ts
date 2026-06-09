@@ -7261,5 +7261,218 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 21A: SUBSCRIPTION PLAN MANAGEMENT
+    // ══════════════════════════════════════════════════════════════════════
+
+    // Public endpoint — portals fetch active/public plans (no auth)
+    {
+      path: '/public-plans',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const db = (cloudflare.env as any).D1 as D1Database
+          const url = new URL(req.url)
+          const audience = url.searchParams.get('audience') || ''
+
+          // Ensure table exists
+          await db.prepare(`CREATE TABLE IF NOT EXISTS subscription_plans (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            audience TEXT NOT NULL DEFAULT 'client',
+            name TEXT NOT NULL,
+            slug TEXT NOT NULL,
+            description TEXT,
+            short_description TEXT,
+            price_cents INTEGER NOT NULL DEFAULT 0,
+            currency TEXT NOT NULL DEFAULT 'USD',
+            billing_interval TEXT NOT NULL DEFAULT 'monthly',
+            trial_days INTEGER DEFAULT 0,
+            is_active INTEGER NOT NULL DEFAULT 1,
+            is_public INTEGER NOT NULL DEFAULT 1,
+            sort_order INTEGER DEFAULT 0,
+            features_json TEXT DEFAULT '[]',
+            limits_json TEXT DEFAULT '{}',
+            stripe_price_id TEXT,
+            stripe_product_id TEXT,
+            checkout_mode TEXT DEFAULT 'subscription',
+            cta_label TEXT DEFAULT 'Choose Plan',
+            highlight_label TEXT,
+            is_recommended INTEGER DEFAULT 0,
+            effective_from TEXT,
+            effective_to TEXT,
+            created_by TEXT,
+            updated_by TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
+            archived_at TEXT,
+            UNIQUE(slug)
+          )`).run()
+
+          // Seed default plans if table is empty
+          const countRow = await db.prepare('SELECT COUNT(*) as cnt FROM subscription_plans').first() as any
+          if (!countRow || Number(countRow.cnt) === 0) {
+            const seeds = [
+              { audience: 'client', name: 'Essential', slug: 'essential', short_description: 'Perfect for getting started', price_cents: 1500, stripe_price_id: 'price_1TQhO56E8zcVOY4tJyqfoiwi', is_recommended: 0, sort_order: 1, features_json: JSON.stringify(['5 contact unlocks/month','Priority caregiver matching','Interview scheduling','Email support']), cta_label: 'Choose Essential', highlight_label: null, billing_interval: 'monthly' },
+              { audience: 'client', name: 'Family', slug: 'family', short_description: 'Best for families with ongoing care needs', price_cents: 2900, stripe_price_id: 'price_1TQhO56E8zcVOY4t4q1gjG7a', is_recommended: 1, sort_order: 2, features_json: JSON.stringify(['Unlimited contact unlocks','2 active caregivers','Family coordination tools','Chat support','Care schedule tracking']), cta_label: 'Choose Family', highlight_label: 'Most Popular', billing_interval: 'monthly' },
+              { audience: 'client', name: 'Premium', slug: 'premium', short_description: 'Full-service care coordination', price_cents: 5900, stripe_price_id: 'price_1TQhO66E8zcVOY4tmYqFthdT', is_recommended: 0, sort_order: 3, features_json: JSON.stringify(['Everything in Family','Dedicated care coordinator','24/7 phone support','Background check priority','Personalized care plan']), cta_label: 'Choose Premium', highlight_label: 'Best for Families', billing_interval: 'monthly' },
+              { audience: 'caregiver', name: 'Pay-per-Lead', slug: 'pay-per-lead', short_description: 'Unlock individual care requests', price_cents: 499, stripe_price_id: 'price_1TQmae6E8zcVOY4tSunkjW89', is_recommended: 0, sort_order: 1, features_json: JSON.stringify(['Single request unlock','View client contact info','Pay only when needed']), cta_label: 'Unlock $4.99', highlight_label: null, billing_interval: 'one_time' },
+              { audience: 'caregiver', name: 'Unlimited', slug: 'caregiver-unlimited', short_description: 'Unlimited access to all care requests', price_cents: 1999, stripe_price_id: 'price_1TQmcY6E8zcVOY4tSOJ9E3X2', is_recommended: 1, sort_order: 2, features_json: JSON.stringify(['Unlimited request unlocks','Priority profile placement','All client contact info','Trust Passport visibility']), cta_label: 'Go Unlimited $19.99/mo', highlight_label: 'Best Value', billing_interval: 'monthly' },
+            ]
+            for (const s of seeds) {
+              try {
+                await db.prepare(`INSERT OR IGNORE INTO subscription_plans (audience,name,slug,short_description,price_cents,stripe_price_id,is_recommended,sort_order,features_json,cta_label,highlight_label,billing_interval,is_active,is_public) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,1)`).bind(s.audience,s.name,s.slug,s.short_description,s.price_cents,s.stripe_price_id,s.is_recommended,s.sort_order,s.features_json,s.cta_label,s.highlight_label||null,s.billing_interval).run()
+              } catch(_) {}
+            }
+          }
+
+          let query = `SELECT * FROM subscription_plans WHERE is_active = 1 AND is_public = 1 AND archived_at IS NULL`
+          const binds: any[] = []
+          if (audience && ['client','caregiver'].includes(audience)) {
+            query += ` AND (audience = ? OR audience = 'both')`
+            binds.push(audience)
+          }
+          query += ` AND (effective_from IS NULL OR effective_from <= datetime('now'))`
+          query += ` AND (effective_to IS NULL OR effective_to >= datetime('now'))`
+          query += ` ORDER BY sort_order ASC, price_cents ASC, created_at ASC`
+
+          const { results } = binds.length ? await db.prepare(query).bind(...binds).all() : await db.prepare(query).all()
+          const plans = (results || []).map((p: any) => ({
+            id: p.id,
+            audience: p.audience,
+            name: p.name,
+            slug: p.slug,
+            description: p.description || '',
+            shortDescription: p.short_description || '',
+            priceCents: p.price_cents,
+            currency: p.currency || 'USD',
+            billingInterval: p.billing_interval || 'monthly',
+            trialDays: p.trial_days || 0,
+            features: (() => { try { return JSON.parse(p.features_json || '[]') } catch { return [] } })(),
+            limits: (() => { try { return JSON.parse(p.limits_json || '{}') } catch { return {} } })(),
+            stripePriceId: p.stripe_price_id || null,
+            ctaLabel: p.cta_label || 'Choose Plan',
+            highlightLabel: p.highlight_label || null,
+            isRecommended: !!p.is_recommended,
+            sortOrder: p.sort_order || 0,
+          }))
+          return Response.json({ plans }, { headers })
+        } catch (e: any) {
+          return Response.json({ plans: [], error: e.message }, { headers })
+        }
+      },
+    },
+
+    // Admin: list all plans
+    {
+      path: '/admin-plans',
+      method: 'get',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const db = (cloudflare.env as any).D1 as D1Database
+          const url = new URL(req.url)
+          const token = url.searchParams.get('token') || ''
+          if (!token) return Response.json({ error: 'token required' }, { status: 401, headers })
+          const sess = await db.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+
+          await db.prepare(`CREATE TABLE IF NOT EXISTS subscription_plans (id INTEGER PRIMARY KEY AUTOINCREMENT, audience TEXT NOT NULL DEFAULT 'client', name TEXT NOT NULL, slug TEXT NOT NULL, description TEXT, short_description TEXT, price_cents INTEGER NOT NULL DEFAULT 0, currency TEXT NOT NULL DEFAULT 'USD', billing_interval TEXT NOT NULL DEFAULT 'monthly', trial_days INTEGER DEFAULT 0, is_active INTEGER NOT NULL DEFAULT 1, is_public INTEGER NOT NULL DEFAULT 1, sort_order INTEGER DEFAULT 0, features_json TEXT DEFAULT '[]', limits_json TEXT DEFAULT '{}', stripe_price_id TEXT, stripe_product_id TEXT, checkout_mode TEXT DEFAULT 'subscription', cta_label TEXT DEFAULT 'Choose Plan', highlight_label TEXT, is_recommended INTEGER DEFAULT 0, effective_from TEXT, effective_to TEXT, created_by TEXT, updated_by TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), archived_at TEXT, UNIQUE(slug))`).run()
+
+          const audience = url.searchParams.get('audience') || ''
+          const { results } = audience
+            ? await db.prepare('SELECT * FROM subscription_plans WHERE audience = ? ORDER BY audience ASC, sort_order ASC, price_cents ASC').bind(audience).all()
+            : await db.prepare('SELECT * FROM subscription_plans ORDER BY audience ASC, sort_order ASC, price_cents ASC').all()
+          return Response.json({ plans: results || [] }, { headers })
+        } catch (e: any) {
+          return Response.json({ plans: [], error: e.message }, { headers })
+        }
+      },
+    },
+
+    // Admin: create plan
+    {
+      path: '/admin-plans',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const db = (cloudflare.env as any).D1 as D1Database
+          const body = await req.json()
+          const { token, audience, name, slug, description='', short_description='', price_cents=0, currency='USD', billing_interval='monthly', trial_days=0, is_active=1, is_public=1, sort_order=0, features_json='[]', limits_json='{}', stripe_price_id='', stripe_product_id='', checkout_mode='subscription', cta_label='Choose Plan', highlight_label='', is_recommended=0, effective_from=null, effective_to=null } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 401, headers })
+          const sess = await db.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+          if (!audience || !name || !slug) return Response.json({ error: 'audience, name, slug required' }, { status: 400, headers })
+
+          await db.prepare(`INSERT INTO subscription_plans (audience,name,slug,description,short_description,price_cents,currency,billing_interval,trial_days,is_active,is_public,sort_order,features_json,limits_json,stripe_price_id,stripe_product_id,checkout_mode,cta_label,highlight_label,is_recommended,effective_from,effective_to,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(audience,name,slug,description,short_description,Number(price_cents),currency,billing_interval,Number(trial_days),is_active?1:0,is_public?1:0,Number(sort_order),features_json,limits_json,stripe_price_id||null,stripe_product_id||null,checkout_mode,cta_label,highlight_label||null,is_recommended?1:0,effective_from||null,effective_to||null,sess.email).run()
+
+          try { await db.prepare(`INSERT OR IGNORE INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,new_value) VALUES (?,?,?,?,?)`).bind(sess.email,'subscription_plan_created','subscription_plan',slug,JSON.stringify({name,audience,price_cents})).run() } catch(_) {}
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers })
+        }
+      },
+    },
+
+    // Admin: update plan
+    {
+      path: '/admin-plans',
+      method: 'put',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' }
+        try {
+          const db = (cloudflare.env as any).D1 as D1Database
+          const body = await req.json()
+          const { token, id, audience, name, slug, description, short_description, price_cents, currency, billing_interval, trial_days, is_active, is_public, sort_order, features_json, limits_json, stripe_price_id, stripe_product_id, checkout_mode, cta_label, highlight_label, is_recommended, effective_from, effective_to, archived_at } = body
+          if (!token) return Response.json({ error: 'token required' }, { status: 401, headers })
+          if (!id) return Response.json({ error: 'id required' }, { status: 400, headers })
+          const sess = await db.prepare('SELECT ca.is_admin, ca.email FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1').bind(token).first() as any
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers })
+
+          const existing = await db.prepare('SELECT * FROM subscription_plans WHERE id = ?').bind(Number(id)).first() as any
+          if (!existing) return Response.json({ error: 'Plan not found' }, { status: 404, headers })
+
+          const upd = {
+            audience: audience ?? existing.audience,
+            name: name ?? existing.name,
+            slug: slug ?? existing.slug,
+            description: description ?? existing.description ?? '',
+            short_description: short_description ?? existing.short_description ?? '',
+            price_cents: price_cents !== undefined ? Number(price_cents) : Number(existing.price_cents),
+            currency: currency ?? existing.currency ?? 'USD',
+            billing_interval: billing_interval ?? existing.billing_interval ?? 'monthly',
+            trial_days: trial_days !== undefined ? Number(trial_days) : Number(existing.trial_days ?? 0),
+            is_active: is_active !== undefined ? (is_active ? 1 : 0) : existing.is_active,
+            is_public: is_public !== undefined ? (is_public ? 1 : 0) : existing.is_public,
+            sort_order: sort_order !== undefined ? Number(sort_order) : Number(existing.sort_order ?? 0),
+            features_json: features_json ?? existing.features_json ?? '[]',
+            limits_json: limits_json ?? existing.limits_json ?? '{}',
+            stripe_price_id: stripe_price_id !== undefined ? (stripe_price_id || null) : existing.stripe_price_id,
+            stripe_product_id: stripe_product_id !== undefined ? (stripe_product_id || null) : existing.stripe_product_id,
+            checkout_mode: checkout_mode ?? existing.checkout_mode ?? 'subscription',
+            cta_label: cta_label ?? existing.cta_label ?? 'Choose Plan',
+            highlight_label: highlight_label !== undefined ? (highlight_label || null) : existing.highlight_label,
+            is_recommended: is_recommended !== undefined ? (is_recommended ? 1 : 0) : existing.is_recommended,
+            effective_from: effective_from !== undefined ? (effective_from || null) : existing.effective_from,
+            effective_to: effective_to !== undefined ? (effective_to || null) : existing.effective_to,
+            archived_at: archived_at !== undefined ? (archived_at || null) : existing.archived_at,
+          }
+
+          await db.prepare(`UPDATE subscription_plans SET audience=?,name=?,slug=?,description=?,short_description=?,price_cents=?,currency=?,billing_interval=?,trial_days=?,is_active=?,is_public=?,sort_order=?,features_json=?,limits_json=?,stripe_price_id=?,stripe_product_id=?,checkout_mode=?,cta_label=?,highlight_label=?,is_recommended=?,effective_from=?,effective_to=?,archived_at=?,updated_by=?,updated_at=datetime('now') WHERE id=?`).bind(upd.audience,upd.name,upd.slug,upd.description,upd.short_description,upd.price_cents,upd.currency,upd.billing_interval,upd.trial_days,upd.is_active,upd.is_public,upd.sort_order,upd.features_json,upd.limits_json,upd.stripe_price_id,upd.stripe_product_id,upd.checkout_mode,upd.cta_label,upd.highlight_label,upd.is_recommended,upd.effective_from,upd.effective_to,upd.archived_at,sess.email,Number(id)).run()
+
+          if (upd.price_cents !== Number(existing.price_cents)) {
+            try { await db.prepare(`INSERT OR IGNORE INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,previous_value,new_value) VALUES (?,?,?,?,?,?)`).bind(sess.email,'subscription_plan_price_changed','subscription_plan',String(id),String(existing.price_cents),String(upd.price_cents)).run() } catch(_) {}
+          }
+          try { await db.prepare(`INSERT OR IGNORE INTO trust_safety_audit_logs (actor_email,action,target_type,target_id,new_value) VALUES (?,?,?,?,?)`).bind(sess.email,'subscription_plan_updated','subscription_plan',String(id),JSON.stringify({name:upd.name,price_cents:upd.price_cents})).run() } catch(_) {}
+
+          return Response.json({ success: true }, { headers })
+        } catch (e: any) {
+          return Response.json({ error: e.message }, { status: 500, headers })
+        }
+      },
+    },
+
   ],
 })
