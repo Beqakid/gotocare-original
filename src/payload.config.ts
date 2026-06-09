@@ -7474,5 +7474,219 @@ Return a JSON object with these fields:
       },
     },
 
+
+    // ══════════════════════════════════════════════════════════════════════
+    // PHASE 21A: Admin Kai — Read-Only AI Copilot
+    // POST /api/admin-kai  { token, prompt, pageContext }
+    // ══════════════════════════════════════════════════════════════════════
+    {
+      path: '/admin-kai',
+      method: 'post',
+      handler: async (req: any) => {
+        const headers = { 'Access-Control-Allow-Origin': '*', 'Content-Type': 'application/json' };
+        try {
+          const env = cloudflare.env as any;
+          const body = await req.json();
+          const token = (body.token || '').trim();
+          if (!token) return Response.json({ error: 'Unauthorized' }, { status: 403, headers });
+
+          // Auth check
+          const sess = await env.D1.prepare(
+            'SELECT ca.is_admin, ca.email, ca.name FROM client_sessions cs JOIN client_accounts ca ON ca.email = cs.email WHERE cs.session_token = ? LIMIT 1'
+          ).bind(token).first() as any;
+          if (!sess?.is_admin) return Response.json({ error: 'Unauthorized' }, { status: 403, headers });
+
+          // Get admin role from admin_users
+          let role = 'super_admin';
+          try {
+            const au = await env.D1.prepare('SELECT role FROM admin_users WHERE email = ? LIMIT 1').bind(sess.email).first() as any;
+            if (au?.role) role = au.role;
+          } catch(_) {}
+
+          const prompt = (body.prompt || '').slice(0, 600).trim();
+          const pageContext = (body.pageContext || '').slice(0, 300);
+          if (!prompt) return Response.json({ error: 'prompt required' }, { status: 400, headers });
+
+          // RBAC scope map
+          const ROLE_SCOPES: Record<string, string[]> = {
+            super_admin:           ['incidents','product_logs','trust','caregivers','clients','subscriptions','safety'],
+            admin_manager:         ['incidents','product_logs','caregivers','clients','trust'],
+            verification_reviewer: ['trust','caregivers'],
+            support_agent:         ['caregivers','clients','incidents'],
+            finance_admin:         ['subscriptions','clients'],
+            read_only_auditor:     ['product_logs','caregivers','clients'],
+          };
+          const allowedScopes = ROLE_SCOPES[role] ?? ROLE_SCOPES['read_only_auditor'];
+
+          const contextParts: string[] = [];
+          const sourceAreasUsed: string[] = [];
+
+          // ── Incidents ─────────────────────────────────────────────────
+          if (allowedScopes.includes('incidents')) {
+            try {
+              await env.D1.prepare(`CREATE TABLE IF NOT EXISTS trust_safety_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, reporter_type TEXT DEFAULT 'guest',
+                reporter_name TEXT, reporter_email TEXT, related_caregiver_id TEXT,
+                related_client_id TEXT, category TEXT, urgency TEXT DEFAULT 'medium',
+                description TEXT, status TEXT DEFAULT 'new', assigned_admin TEXT,
+                internal_notes TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
+              )`).run();
+              const { results: incidents } = await env.D1.prepare(
+                \`SELECT id, category, urgency, status, assigned_admin, created_at FROM trust_safety_incidents
+                 ORDER BY CASE WHEN LOWER(urgency)='emergency' THEN 0 WHEN LOWER(urgency)='high' THEN 1 ELSE 2 END, created_at DESC LIMIT 20\`
+              ).all();
+              if (incidents?.length) {
+                sourceAreasUsed.push('Incidents');
+                contextParts.push(\`INCIDENTS (recent \${incidents.length}):\n\` + (incidents as any[]).map(i =>
+                  \`- [#\${i.id}] \${i.category||'Unknown'} | urgency:\${i.urgency} | status:\${i.status} | assigned:\${i.assigned_admin||'unassigned'} | \${i.created_at}\`
+                ).join('\n'));
+              } else {
+                contextParts.push('INCIDENTS: No incidents on record.');
+              }
+            } catch(_) {}
+          }
+
+          // ── Product Logs ───────────────────────────────────────────────
+          if (allowedScopes.includes('product_logs')) {
+            try {
+              const { results: plogs } = await env.D1.prepare(
+                \`SELECT title, type, priority, status, app_area, phase, updated_at FROM product_logs
+                 WHERE status NOT IN ('Closed','Verified')
+                 ORDER BY CASE WHEN priority='Critical' THEN 0 WHEN priority='High' THEN 1 WHEN priority='Medium' THEN 2 ELSE 3 END LIMIT 20\`
+              ).all();
+              if (plogs?.length) {
+                sourceAreasUsed.push('Product Logs');
+                contextParts.push(\`OPEN PRODUCT LOGS (\${plogs.length}):\n\` + (plogs as any[]).map(p =>
+                  \`- [\${p.priority}] \${p.title} | \${p.type} | \${p.status} | area:\${p.app_area||'—'} | phase:\${p.phase||'—'}\`
+                ).join('\n'));
+              } else {
+                contextParts.push('PRODUCT LOGS: No open logs found.');
+              }
+            } catch(_) { contextParts.push('PRODUCT LOGS: Data not available.'); }
+          }
+
+          // ── Caregivers + Trust ─────────────────────────────────────────
+          if (allowedScopes.includes('caregivers') || allowedScopes.includes('trust')) {
+            try {
+              const { results: cgs } = await env.D1.prepare(
+                \`SELECT ca.id, ca.name, ca.city, ca.state, ca.created_at, ca.safety_status,
+                        cts.score, cts.level, cts.id_verified, cts.background_checked, cts.cpr_certified, cts.updated_at as trust_updated
+                 FROM caregiver_accounts ca
+                 LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id = ca.id
+                 ORDER BY ca.created_at DESC LIMIT 50\`
+              ).all();
+              if (cgs?.length) {
+                sourceAreasUsed.push('Caregivers');
+                const total = cgs.length;
+                const suspended = (cgs as any[]).filter(c => c.safety_status && c.safety_status !== 'active').length;
+                const needsTrust = (cgs as any[]).filter(c => !c.score || (c.score as number) < 40).length;
+                contextParts.push(\`CAREGIVERS: \${total} total | \${suspended} non-active safety status | \${needsTrust} with low/no trust score\`);
+                if (allowedScopes.includes('trust')) {
+                  sourceAreasUsed.push('Trust Review');
+                  const needsReview = (cgs as any[]).filter(c => !c.id_verified || !c.background_checked).slice(0, 10);
+                  if (needsReview.length) {
+                    contextParts.push(\`TRUST REVIEW NEEDED (\${needsReview.length} caregivers):\n\` + needsReview.map((c: any) =>
+                      \`- [ID:\${c.id}] \${c.name||'Unknown'} | score:\${c.score||0} | level:\${c.level||'Getting Started'} | id_verified:\${c.id_verified?'yes':'no'} | bg_checked:\${c.background_checked?'yes':'no'}\`
+                    ).join('\n'));
+                  }
+                }
+              }
+            } catch(_) {}
+          }
+
+          // ── Clients ────────────────────────────────────────────────────
+          if (allowedScopes.includes('clients')) {
+            try {
+              const clientCount = await env.D1.prepare('SELECT COUNT(*) as total FROM client_accounts').first() as any;
+              sourceAreasUsed.push('Clients');
+              contextParts.push(\`CLIENTS: \${clientCount?.total || 0} total registered\`);
+            } catch(_) {}
+          }
+
+          // ── Subscriptions ──────────────────────────────────────────────
+          if (allowedScopes.includes('subscriptions')) {
+            try {
+              const { results: subs } = await env.D1.prepare(
+                "SELECT plan, COUNT(*) as cnt FROM client_subscriptions WHERE status='active' GROUP BY plan"
+              ).all();
+              const { results: cgSubs } = await env.D1.prepare(
+                "SELECT plan, COUNT(*) as cnt FROM caregiver_subscriptions WHERE status='active' GROUP BY plan"
+              ).all();
+              sourceAreasUsed.push('Subscriptions');
+              const subSummary = (subs as any[]).map(s => \`\${s.plan}:\${s.cnt}\`).join(', ') || 'none';
+              const cgSubSummary = (cgSubs as any[]).map(s => \`\${s.plan}:\${s.cnt}\`).join(', ') || 'none';
+              contextParts.push(\`SUBSCRIPTIONS — Client active plans: \${subSummary}\nCaregiver active plans: \${cgSubSummary}\`);
+            } catch(_) {}
+          }
+
+          // ── Safety Status ──────────────────────────────────────────────
+          if (allowedScopes.includes('safety')) {
+            try {
+              const { results: safetyRows } = await env.D1.prepare(
+                "SELECT user_type, status, COUNT(*) as cnt FROM user_safety_status WHERE status != 'active' GROUP BY user_type, status"
+              ).all();
+              if (safetyRows?.length) {
+                sourceAreasUsed.push('Safety Status');
+                contextParts.push('NON-ACTIVE SAFETY STATUSES:\n' + (safetyRows as any[]).map(r =>
+                  \`- \${r.user_type} \${r.status}: \${r.cnt}\`
+                ).join('\n'));
+              }
+            } catch(_) {}
+          }
+
+          // ── Build system prompt ────────────────────────────────────────
+          const systemPrompt = \`You are Kai, a read-only admin copilot for Carehia — a home care marketplace platform.
+Your job: help admins understand operations through clear summaries, explanations, and recommended next steps.
+You CANNOT perform any actions. If asked, respond: "I can suggest the next step, but I cannot perform admin actions in this phase. Please use the admin controls to complete the action."
+You MUST NOT reveal: SSNs, ITINs, DOB, exact addresses, background report details, payment card info, or private internal admin notes.
+You MUST NOT invent or guess data. If unavailable: say "I do not have that data available yet."
+If results are empty: say "No matching items found."
+Be concise, professional, and action-oriented. Use bullet points for lists.
+
+Admin role: \${role}
+Admin email: \${sess.email}
+Allowed scopes: \${allowedScopes.join(', ')}
+\${pageContext ? \`Page context: \${pageContext}\n\` : ''}
+--- PLATFORM DATA ---
+\${contextParts.length ? contextParts.join('\n\n') : 'No platform data available for allowed scopes.'}\`;
+
+          // ── OpenAI call ────────────────────────────────────────────────
+          const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+            method: 'POST',
+            headers: { 'Authorization': \`Bearer \${env.OPENAI_API_KEY}\`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              model: 'gpt-4o-mini',
+              messages: [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: prompt }
+              ],
+              max_tokens: 900,
+              temperature: 0.25
+            })
+          });
+
+          if (!openaiRes.ok) {
+            return Response.json({ error: 'AI service unavailable. Please try again shortly.' }, { status: 503, headers });
+          }
+          const openaiData = await openaiRes.json() as any;
+          const answer = openaiData.choices?.[0]?.message?.content?.trim() || 'I could not generate a response. Please try again.';
+
+          // ── Suggest navigation links ───────────────────────────────────
+          const suggestedLinks: Array<{label: string, tab: string}> = [];
+          const al = answer.toLowerCase();
+          if (al.includes('incident'))                           suggestedLinks.push({ label: 'View Incidents', tab: 'incidents' });
+          if (al.includes('trust') || al.includes('passport'))  suggestedLinks.push({ label: 'Trust Review', tab: 'trust' });
+          if (al.includes('product log') || al.includes('plog')) suggestedLinks.push({ label: 'Product Logs', tab: 'plogs' });
+          if (al.includes('caregiver'))                          suggestedLinks.push({ label: 'Caregivers', tab: 'caregivers' });
+          if (al.includes('subscription') || al.includes('plan')) suggestedLinks.push({ label: 'Plans', tab: 'plans' });
+          if (al.includes('client'))                             suggestedLinks.push({ label: 'Clients', tab: 'clients' });
+
+          return Response.json({ answer, sourceAreasUsed, suggestedLinks }, { headers });
+        } catch(e: any) {
+          return Response.json({ error: 'I could not load that admin data right now. Please try again.' }, { status: 500, headers });
+        }
+      },
+    },
+
   ],
 })
