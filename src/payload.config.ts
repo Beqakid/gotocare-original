@@ -2250,13 +2250,27 @@ Return a JSON object with these fields:
           const returnContext = (body as any).returnContext || null
           if (!email || !plan) return Response.json({ error: 'email and plan required' }, { status: 400 })
 
+          // Phase 21C: validate plan against subscription_plans DB (audience, active, public)
+          const db21c = (cloudflare.env as any).D1 as D1Database
+          const planRow = await db21c.prepare(
+            'SELECT stripe_price_id, is_active, is_public, audience FROM subscription_plans WHERE slug = ? LIMIT 1'
+          ).bind(plan.toLowerCase()).first() as any | null
+
+          if (planRow) {
+            // Plan exists in DB — enforce audience, active, public gates
+            if (!planRow.is_active)  return Response.json({ error: 'This plan is no longer available.' }, { status: 400 })
+            if (!planRow.is_public)  return Response.json({ error: 'This plan is not available.' }, { status: 400 })
+            if (planRow.audience !== 'client') return Response.json({ error: 'Invalid plan for this portal.' }, { status: 403 })
+          }
+
+          // Hardcoded fallback price IDs (used when DB row has no stripe_price_id)
           const priceMap: Record<string, string> = {
             essential: 'price_1TQhO56E8zcVOY4tJyqfoiwi',
             family: 'price_1TQhO56E8zcVOY4t4q1gjG7a',
             premium: 'price_1TQhO66E8zcVOY4tmYqFthdT',
           }
-          const priceId = priceMap[plan.toLowerCase()]
-          if (!priceId) return Response.json({ error: 'Invalid plan' }, { status: 400 })
+          const priceId = (planRow?.stripe_price_id) || priceMap[plan.toLowerCase()]
+          if (!priceId) return Response.json({ error: 'No payment configuration for this plan.' }, { status: 400 })
 
           // Phase 26A: Build success_url with full context so app can restore caregiver + action
           const successBase = 'https://app.carehia.com/'
@@ -2917,9 +2931,19 @@ Return a JSON object with these fields:
           const cHash = cRt === 'work' ? 'schedule' : cRt === 'today' ? 'home' : cRt === 'money' ? 'earnings' : cRt
           const successUrl = `https://work.carehia.com/?subscription=success&role=caregiver&session_id={CHECKOUT_SESSION_ID}&plan=unlimited&caregiver_action=${encodeURIComponent(cAct)}&request_id=${encodeURIComponent(cRid)}&return_tab=${encodeURIComponent(cRt)}&return_view=${encodeURIComponent(cRv)}#${cHash}`
           const cancelUrl  = `https://work.carehia.com/?subscription=cancelled&role=caregiver&caregiver_action=${encodeURIComponent(cAct)}&request_id=${encodeURIComponent(cRid)}&return_tab=${encodeURIComponent(cRt)}&return_view=${encodeURIComponent(cRv)}#${cHash}`
+          // Phase 21C: validate caregiver unlimited plan from subscription_plans DB
+          const db21cCg = (cloudflare.env as any).D1 as D1Database
+          const cgPlanRow = await db21cCg.prepare(
+            "SELECT stripe_price_id, is_active, is_public FROM subscription_plans WHERE audience = 'caregiver' AND slug = 'unlimited' LIMIT 1"
+          ).first() as any | null
+          if (cgPlanRow && (!cgPlanRow.is_active || !cgPlanRow.is_public)) {
+            return Response.json({ error: 'This plan is no longer available.' }, { status: 400 })
+          }
+          const cgPriceId = (cgPlanRow?.stripe_price_id) || 'price_1TQmcY6E8zcVOY4tSOJ9E3X2'
+
           const params = new URLSearchParams({
             'mode': 'subscription',
-            'line_items[0][price]': 'price_1TQmcY6E8zcVOY4tSOJ9E3X2',
+            'line_items[0][price]': cgPriceId,
             'line_items[0][quantity]': '1',
             'success_url': successUrl,
             'cancel_url': cancelUrl,
