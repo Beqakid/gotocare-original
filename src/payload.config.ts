@@ -7556,13 +7556,13 @@ Return a JSON object with these fields:
                 internal_notes TEXT, created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now'))
               )`).run();
               const { results: incidents } = await env.D1.prepare(
-                \`SELECT id, category, urgency, status, assigned_admin, created_at FROM trust_safety_incidents
-                 ORDER BY CASE WHEN LOWER(urgency)='emergency' THEN 0 WHEN LOWER(urgency)='high' THEN 1 ELSE 2 END, created_at DESC LIMIT 20\`
+                `SELECT id, category, urgency, status, assigned_admin, created_at FROM trust_safety_incidents
+                 ORDER BY CASE WHEN LOWER(urgency)='emergency' THEN 0 WHEN LOWER(urgency)='high' THEN 1 ELSE 2 END, created_at DESC LIMIT 20`
               ).all();
               if (incidents?.length) {
                 sourceAreasUsed.push('Incidents');
-                contextParts.push(\`INCIDENTS (recent \${incidents.length}):\n\` + (incidents as any[]).map(i =>
-                  \`- [#\${i.id}] \${i.category||'Unknown'} | urgency:\${i.urgency} | status:\${i.status} | assigned:\${i.assigned_admin||'unassigned'} | \${i.created_at}\`
+                contextParts.push(`INCIDENTS (recent ${incidents.length}):\n` + (incidents as any[]).map(i =>
+                  `- [#${i.id}] ${i.category||'Unknown'} | urgency:${i.urgency} | status:${i.status} | assigned:${i.assigned_admin||'unassigned'} | ${i.created_at}`
                 ).join('\n'));
               } else {
                 contextParts.push('INCIDENTS: No incidents on record.');
@@ -7574,14 +7574,14 @@ Return a JSON object with these fields:
           if (allowedScopes.includes('product_logs')) {
             try {
               const { results: plogs } = await env.D1.prepare(
-                \`SELECT title, type, priority, status, app_area, phase, updated_at FROM product_logs
+                `SELECT title, type, priority, status, app_area, phase, updated_at FROM product_logs
                  WHERE status NOT IN ('Closed','Verified')
-                 ORDER BY CASE WHEN priority='Critical' THEN 0 WHEN priority='High' THEN 1 WHEN priority='Medium' THEN 2 ELSE 3 END LIMIT 20\`
+                 ORDER BY CASE WHEN priority='Critical' THEN 0 WHEN priority='High' THEN 1 WHEN priority='Medium' THEN 2 ELSE 3 END LIMIT 20`
               ).all();
               if (plogs?.length) {
                 sourceAreasUsed.push('Product Logs');
-                contextParts.push(\`OPEN PRODUCT LOGS (\${plogs.length}):\n\` + (plogs as any[]).map(p =>
-                  \`- [\${p.priority}] \${p.title} | \${p.type} | \${p.status} | area:\${p.app_area||'—'} | phase:\${p.phase||'—'}\`
+                contextParts.push(`OPEN PRODUCT LOGS (${plogs.length}):\n` + (plogs as any[]).map(p =>
+                  `- [${p.priority}] ${p.title} | ${p.type} | ${p.status} | area:${p.app_area||'—'} | phase:${p.phase||'—'}`
                 ).join('\n'));
               } else {
                 contextParts.push('PRODUCT LOGS: No open logs found.');
@@ -7593,24 +7593,24 @@ Return a JSON object with these fields:
           if (allowedScopes.includes('caregivers') || allowedScopes.includes('trust')) {
             try {
               const { results: cgs } = await env.D1.prepare(
-                \`SELECT ca.id, ca.name, ca.city, ca.state, ca.created_at, ca.safety_status,
+                `SELECT ca.id, ca.name, ca.city, ca.state, ca.created_at, ca.safety_status,
                         cts.score, cts.level, cts.id_verified, cts.background_checked, cts.cpr_certified, cts.updated_at as trust_updated
                  FROM caregiver_accounts ca
                  LEFT JOIN caregiver_trust_scores cts ON cts.caregiver_id = ca.id
-                 ORDER BY ca.created_at DESC LIMIT 50\`
+                 ORDER BY ca.created_at DESC LIMIT 50`
               ).all();
               if (cgs?.length) {
                 sourceAreasUsed.push('Caregivers');
                 const total = cgs.length;
                 const suspended = (cgs as any[]).filter(c => c.safety_status && c.safety_status !== 'active').length;
                 const needsTrust = (cgs as any[]).filter(c => !c.score || (c.score as number) < 40).length;
-                contextParts.push(\`CAREGIVERS: \${total} total | \${suspended} non-active safety status | \${needsTrust} with low/no trust score\`);
+                contextParts.push(`CAREGIVERS: ${total} total | ${suspended} non-active safety status | ${needsTrust} with low/no trust score`);
                 if (allowedScopes.includes('trust')) {
                   sourceAreasUsed.push('Trust Review');
                   const needsReview = (cgs as any[]).filter(c => !c.id_verified || !c.background_checked).slice(0, 10);
                   if (needsReview.length) {
-                    contextParts.push(\`TRUST REVIEW NEEDED (\${needsReview.length} caregivers):\n\` + needsReview.map((c: any) =>
-                      \`- [ID:\${c.id}] \${c.name||'Unknown'} | score:\${c.score||0} | level:\${c.level||'Getting Started'} | id_verified:\${c.id_verified?'yes':'no'} | bg_checked:\${c.background_checked?'yes':'no'}\`
+                    contextParts.push(`TRUST REVIEW NEEDED (${needsReview.length} caregivers):\n` + needsReview.map((c: any) =>
+                      `- [ID:${c.id}] ${c.name||'Unknown'} | score:${c.score||0} | level:${c.level||'Getting Started'} | id_verified:${c.id_verified?'yes':'no'} | bg_checked:${c.background_checked?'yes':'no'}`
                     ).join('\n'));
                   }
                 }
@@ -7623,7 +7623,7 @@ Return a JSON object with these fields:
             try {
               const clientCount = await env.D1.prepare('SELECT COUNT(*) as total FROM client_accounts').first() as any;
               sourceAreasUsed.push('Clients');
-              contextParts.push(\`CLIENTS: \${clientCount?.total || 0} total registered\`);
+              contextParts.push(`CLIENTS: ${clientCount?.total || 0} total registered`);
             } catch(_) {}
           }
 
@@ -7637,9 +7637,9 @@ Return a JSON object with these fields:
                 "SELECT plan, COUNT(*) as cnt FROM caregiver_subscriptions WHERE status='active' GROUP BY plan"
               ).all();
               sourceAreasUsed.push('Subscriptions');
-              const subSummary = (subs as any[]).map(s => \`\${s.plan}:\${s.cnt}\`).join(', ') || 'none';
-              const cgSubSummary = (cgSubs as any[]).map(s => \`\${s.plan}:\${s.cnt}\`).join(', ') || 'none';
-              contextParts.push(\`SUBSCRIPTIONS — Client active plans: \${subSummary}\nCaregiver active plans: \${cgSubSummary}\`);
+              const subSummary = (subs as any[]).map(s => `${s.plan}:${s.cnt}`).join(', ') || 'none';
+              const cgSubSummary = (cgSubs as any[]).map(s => `${s.plan}:${s.cnt}`).join(', ') || 'none';
+              contextParts.push(`SUBSCRIPTIONS — Client active plans: ${subSummary}\nCaregiver active plans: ${cgSubSummary}`);
             } catch(_) {}
           }
 
@@ -7652,14 +7652,14 @@ Return a JSON object with these fields:
               if (safetyRows?.length) {
                 sourceAreasUsed.push('Safety Status');
                 contextParts.push('NON-ACTIVE SAFETY STATUSES:\n' + (safetyRows as any[]).map(r =>
-                  \`- \${r.user_type} \${r.status}: \${r.cnt}\`
+                  `- ${r.user_type} ${r.status}: ${r.cnt}`
                 ).join('\n'));
               }
             } catch(_) {}
           }
 
           // ── Build system prompt ────────────────────────────────────────
-          const systemPrompt = \`You are Kai, a read-only admin copilot for Carehia — a home care marketplace platform.
+          const systemPrompt = `You are Kai, a read-only admin copilot for Carehia — a home care marketplace platform.
 Your job: help admins understand operations through clear summaries, explanations, and recommended next steps.
 You CANNOT perform any actions. If asked, respond: "I can suggest the next step, but I cannot perform admin actions in this phase. Please use the admin controls to complete the action."
 You MUST NOT reveal: SSNs, ITINs, DOB, exact addresses, background report details, payment card info, or private internal admin notes.
@@ -7667,17 +7667,17 @@ You MUST NOT invent or guess data. If unavailable: say "I do not have that data 
 If results are empty: say "No matching items found."
 Be concise, professional, and action-oriented. Use bullet points for lists.
 
-Admin role: \${role}
-Admin email: \${sess.email}
-Allowed scopes: \${allowedScopes.join(', ')}
-\${pageContext ? \`Page context: \${pageContext}\n\` : ''}
+Admin role: ${role}
+Admin email: ${sess.email}
+Allowed scopes: ${allowedScopes.join(', ')}
+${pageContext ? `Page context: ${pageContext}\n` : ''}
 --- PLATFORM DATA ---
-\${contextParts.length ? contextParts.join('\n\n') : 'No platform data available for allowed scopes.'}\`;
+${contextParts.length ? contextParts.join('\n\n') : 'No platform data available for allowed scopes.'}`;
 
           // ── OpenAI call ────────────────────────────────────────────────
           const openaiRes = await fetch('https://api.openai.com/v1/chat/completions', {
             method: 'POST',
-            headers: { 'Authorization': \`Bearer \${env.OPENAI_API_KEY}\`, 'Content-Type': 'application/json' },
+            headers: { 'Authorization': `Bearer ${env.OPENAI_API_KEY}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
               model: 'gpt-4o-mini',
               messages: [
