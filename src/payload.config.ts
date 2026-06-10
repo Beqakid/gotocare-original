@@ -7513,6 +7513,9 @@ Return a JSON object with these fields:
           const body = await req.json();
           const token = (body.token || '').trim();
           if (!token) return Response.json({ error: 'Unauthorized' }, { status: 403, headers });
+          // Phase 22B: page-aware item context
+          const itemType = (body.itemType || '').trim();
+          const itemId   = (body.itemId   || '').trim();
 
           // Auth check
           const sess = await env.D1.prepare(
@@ -7544,6 +7547,9 @@ Return a JSON object with these fields:
 
           const contextParts: string[] = [];
           const sourceAreasUsed: string[] = [];
+          // Phase 22B: hold raw rows for action generation
+          let _kaiIncidents: any[] = [], _kaiPlogs: any[] = [], _kaiCaregivers: any[] = [];
+          let _kaiPlans: any[] = [], _kaiPlanIssues: string[] = [], _kaiSafetyRows: any[] = [];
 
           // ── Incidents ─────────────────────────────────────────────────
           if (allowedScopes.includes('incidents')) {
@@ -7560,6 +7566,7 @@ Return a JSON object with these fields:
                  ORDER BY CASE WHEN LOWER(urgency)='emergency' THEN 0 WHEN LOWER(urgency)='high' THEN 1 ELSE 2 END, created_at DESC LIMIT 20`
               ).all();
               if (incidents?.length) {
+                _kaiIncidents = incidents as any[];
                 sourceAreasUsed.push('Incidents');
                 contextParts.push(`INCIDENTS (recent ${incidents.length}):\n` + (incidents as any[]).map(i =>
                   `- [#${i.id}] ${i.category||'Unknown'} | urgency:${i.urgency} | status:${i.status} | assigned:${i.assigned_admin||'unassigned'} | ${i.created_at}`
@@ -7579,6 +7586,7 @@ Return a JSON object with these fields:
                  ORDER BY CASE WHEN priority='Critical' THEN 0 WHEN priority='High' THEN 1 WHEN priority='Medium' THEN 2 ELSE 3 END LIMIT 20`
               ).all();
               if (plogs?.length) {
+                _kaiPlogs = plogs as any[];
                 sourceAreasUsed.push('Product Logs');
                 contextParts.push(`OPEN PRODUCT LOGS (${plogs.length}):\n` + (plogs as any[]).map(p =>
                   `- [${p.priority}] ${p.title} | ${p.type} | ${p.status} | area:${p.app_area||'—'} | phase:${p.phase||'—'}`
@@ -7600,6 +7608,7 @@ Return a JSON object with these fields:
                  ORDER BY ca.created_at DESC LIMIT 50`
               ).all();
               if (cgs?.length) {
+                _kaiCaregivers = cgs as any[];
                 sourceAreasUsed.push('Caregivers');
                 const total = cgs.length;
                 const suspended = (cgs as any[]).filter(c => c.safety_status && c.safety_status !== 'active').length;
@@ -7662,6 +7671,7 @@ Return a JSON object with these fields:
                 if (plans?.length) {
                   sourceAreasUsed.push('Plan Health');
                   const issues: string[] = [];
+                  _kaiPlans = plans as any[];
                   for (const p of plans as any[]) {
                     if (!p.stripe_price_id && p.price > 0) issues.push(`[${p.audience}] "${p.name}" (${p.slug}) — missing Stripe Price ID`);
                     if (p.is_recommended && !p.is_active) issues.push(`[${p.audience}] "${p.name}" — marked recommended but inactive`);
@@ -7670,6 +7680,7 @@ Return a JSON object with these fields:
                       issues.push(`[${p.audience}] "${p.name}" — price is 0 but slug is not a free tier`);
                     }
                   }
+                  _kaiPlanIssues = issues;
                   const totalPlans = plans.length;
                   const activePlans = (plans as any[]).filter(p => p.is_active && p.is_public).length;
                   if (issues.length) {
@@ -7689,6 +7700,7 @@ Return a JSON object with these fields:
                 "SELECT user_type, status, COUNT(*) as cnt FROM user_safety_status WHERE status != 'active' GROUP BY user_type, status"
               ).all();
               if (safetyRows?.length) {
+                _kaiSafetyRows = safetyRows as any[];
                 sourceAreasUsed.push('Safety Status');
                 contextParts.push('NON-ACTIVE SAFETY STATUSES:\n' + (safetyRows as any[]).map(r =>
                   `- ${r.user_type} ${r.status}: ${r.cnt}`
@@ -7698,18 +7710,24 @@ Return a JSON object with these fields:
           }
 
           // ── Build system prompt ────────────────────────────────────────
-          const systemPrompt = `You are Kai, a read-only admin copilot for Carehia — a home care marketplace platform.
-Your job: help admins understand operations through clear summaries, explanations, and recommended next steps.
-You CANNOT perform any actions. If asked, respond: "I can suggest the next step, but I cannot perform admin actions in this phase. Please use the admin controls to complete the action."
+          const systemPrompt = `You are Kai, the Carehia Admin Copilot — an intelligent assistant for the Carehia home care marketplace.
+Your job: help admins understand platform operations AND recommend safe next actions they should take manually.
+You SUGGEST actions — you never execute them. If asked to perform an action directly, say: "I can suggest the next step and prepare the details, but I cannot perform admin actions automatically. Please review and confirm using the admin controls."
 You MUST NOT reveal: SSNs, ITINs, DOB, exact addresses, background report details, payment card info, or private internal admin notes.
 You MUST NOT invent or guess data. If unavailable: say "I do not have that data available yet."
-If results are empty: say "No matching items found."
+If results are empty: say "No matching items found." If item is resolved: say "This item appears resolved. No action recommended."
 Be concise, professional, and action-oriented. Use bullet points for lists.
-When asked "What should I review next?" rank by: (1) emergency/high urgency incidents, (2) safety status under_review, (3) Trust Passport proof submissions needing review, (4) Critical/High Product Logs not yet closed, (5) subscription plan issues, (6) other QA items.
+When asked "What should I review next?" or "What should I do next?" rank by: (1) emergency/high urgency incidents, (2) safety status under_review, (3) Trust Passport proof submissions needing review, (4) Critical/High Product Logs not yet closed, (5) subscription plan issues, (6) other QA items.
 When asked about subscription plan issues, check SUBSCRIPTION PLAN HEALTH data and report any issues found.
 When asked about launch blockers, focus on Critical/High Product Logs that are Bug, Known Issue, or Security type.
 When asked about caregivers needing review, highlight those with id_verified:no or bg_checked:no.
-When summarizing, always end with a concise "Recommended Next Action" line.
+When asked about a specific incident, suggest: status to move to, urgency assessment, and draft internal note text.
+When asked about a specific Product Log, suggest: QA next step, whether to defer or retest, and draft QA note text.
+When asked about Trust Review, suggest: approve, request document fix, or keep pending — and draft a caregiver-safe message.
+When asked about subscription plans, suggest: hide until connected, add Stripe Price ID, or verify audience.
+When asked about user safety, suggest: keep under review, check related incidents, or escalate.
+Always end with a concise "Recommended Next Action" line.
+Note: Suggested Actions panel is shown separately in the UI — your answer should provide the reasoning and context.
 
 Admin role: ${role}
 Admin email: ${sess.email}
@@ -7749,7 +7767,155 @@ ${contextParts.length ? contextParts.join('\n\n') : 'No platform data available 
           if (al.includes('subscription') || al.includes('plan')) suggestedLinks.push({ label: 'Plans', tab: 'plans' });
           if (al.includes('client'))                             suggestedLinks.push({ label: 'Clients', tab: 'clients' });
 
-          return Response.json({ answer, sourceAreasUsed, suggestedLinks }, { headers });
+          // ── Phase 22B: Generate suggested actions (deterministic, no hallucination) ──
+          interface KaiSuggestedAction {
+            type: string; label: string; reason: string; riskLevel: 'Low'|'Medium'|'High';
+            relatedItemType: string; relatedItemId: string;
+            draftNote: string; suggestedLink: string; canUserPerform: boolean;
+          }
+          const isReadOnly = role === 'read_only_auditor';
+          const suggestedActions: KaiSuggestedAction[] = [];
+
+          // Incidents → suggest review/investigate
+          if (allowedScopes.includes('incidents') && _kaiIncidents.length) {
+            const highNew = _kaiIncidents.filter((i: any) => i.status === 'new' && (i.urgency === 'emergency' || i.urgency === 'high'));
+            for (const inc of highNew.slice(0, 2)) {
+              suggestedActions.push({
+                type: 'incident_investigate',
+                label: 'Move to Investigating',
+                reason: `Incident #${inc.id} is ${inc.urgency} urgency and still in "new" status — it should not wait.`,
+                riskLevel: 'High',
+                relatedItemType: 'incident', relatedItemId: String(inc.id),
+                draftNote: `Admin review started on incident #${inc.id}. Checking related caregiver/client history and safety status before taking further action.`,
+                suggestedLink: '#incidents',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'admin_manager' || role === 'support_agent'),
+              });
+            }
+            const unassigned = _kaiIncidents.filter((i: any) => !i.assigned_admin && i.status !== 'resolved').slice(0, 1);
+            for (const inc of unassigned) {
+              suggestedActions.push({
+                type: 'incident_assign',
+                label: 'Assign Incident to Admin',
+                reason: `Incident #${inc.id} (${inc.category || 'Unknown'}) has no assigned admin.`,
+                riskLevel: 'Medium',
+                relatedItemType: 'incident', relatedItemId: String(inc.id),
+                draftNote: `Assigning incident #${inc.id} for triage. Category: ${inc.category || 'Unknown'}. Please review and update status.`,
+                suggestedLink: '#incidents',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'admin_manager'),
+              });
+            }
+          }
+
+          // Product Logs → suggest retest or review
+          if (allowedScopes.includes('product_logs') && _kaiPlogs.length) {
+            const highInProgress = _kaiPlogs.filter((p: any) => (p.priority === 'High' || p.priority === 'Critical') && p.status === 'In Progress');
+            for (const p of highInProgress.slice(0, 2)) {
+              suggestedActions.push({
+                type: 'product_log_retest',
+                label: 'Move to Needs Retest',
+                reason: `"${p.title}" is ${p.priority} priority and In Progress — verify the fix was deployed.`,
+                riskLevel: 'Medium',
+                relatedItemType: 'product_log', relatedItemId: String(p.id || ''),
+                draftNote: `Fix deployed for "${p.title}". Needs live retest on caregiver mobile and desktop before closing.`,
+                suggestedLink: '#product-logs',
+                canUserPerform: !isReadOnly,
+              });
+            }
+            const openLogs = _kaiPlogs.filter((p: any) => p.status === 'Open').slice(0, 1);
+            for (const p of openLogs) {
+              suggestedActions.push({
+                type: 'product_log_review',
+                label: 'Review Open Log Status',
+                reason: `"${p.title}" (${p.priority} priority, ${p.app_area || 'Unknown area'}) is still open — determine if it needs escalation.`,
+                riskLevel: 'Low',
+                relatedItemType: 'product_log', relatedItemId: String(p.id || ''),
+                draftNote: `Reviewing status of "${p.title}". Determine if fix is ready for QA, should be escalated, or deferred to post-beta.`,
+                suggestedLink: '#product-logs',
+                canUserPerform: !isReadOnly,
+              });
+            }
+          }
+
+          // Trust Review → suggest document request
+          if (allowedScopes.includes('trust') && _kaiCaregivers.length) {
+            const noId = _kaiCaregivers.filter((c: any) => !c.id_verified).slice(0, 2);
+            for (const c of noId) {
+              suggestedActions.push({
+                type: 'trust_request_id',
+                label: 'Request Government ID',
+                reason: `Caregiver ${c.name || 'ID:'+c.id} has not uploaded a verified government ID — required for Trust Passport.`,
+                riskLevel: 'High',
+                relatedItemType: 'caregiver', relatedItemId: String(c.id),
+                draftNote: `Please upload a clear image of your government-issued ID so Carehia can complete your Trust Passport review and activate your profile.`,
+                suggestedLink: '#trust-review',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'admin_manager' || role === 'verification_reviewer'),
+              });
+            }
+            const noBg = _kaiCaregivers.filter((c: any) => c.id_verified && !c.background_checked).slice(0, 1);
+            for (const c of noBg) {
+              suggestedActions.push({
+                type: 'trust_request_background',
+                label: 'Request Background Check Authorization',
+                reason: `Caregiver ${c.name || 'ID:'+c.id} has ID verified but background check is not authorized.`,
+                riskLevel: 'High',
+                relatedItemType: 'caregiver', relatedItemId: String(c.id),
+                draftNote: `Please authorize the background check consent so Carehia can complete your Trust Passport review and activate your profile for client matches.`,
+                suggestedLink: '#trust-review',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'admin_manager' || role === 'verification_reviewer'),
+              });
+            }
+          }
+
+          // Subscription Plans → suggest fixes
+          if (allowedScopes.includes('subscriptions') && _kaiPlanIssues.length && _kaiPlans.length) {
+            const publicNoStripe = _kaiPlans.filter((p: any) => !p.stripe_price_id && p.price > 0 && p.is_public && p.is_active);
+            for (const p of publicNoStripe.slice(0, 2)) {
+              suggestedActions.push({
+                type: 'plan_hide_until_connected',
+                label: 'Hide Plan Until Checkout Configured',
+                reason: `Plan "${p.name}" is public but has no Stripe Price ID — users hitting checkout will see an error.`,
+                riskLevel: 'High',
+                relatedItemType: 'subscription_plan', relatedItemId: String(p.id),
+                draftNote: `Plan "${p.name}" is currently public but checkout is not configured. Hide it until the Stripe Price ID is connected to prevent checkout errors.`,
+                suggestedLink: '#subscription-plans',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'finance_admin'),
+              });
+            }
+            const inactiveRecommended = _kaiPlans.filter((p: any) => p.is_recommended && !p.is_active);
+            for (const p of inactiveRecommended.slice(0, 1)) {
+              suggestedActions.push({
+                type: 'plan_review_recommended',
+                label: 'Review Recommended Plan Status',
+                reason: `Plan "${p.name}" is marked as recommended but is inactive — users cannot subscribe.`,
+                riskLevel: 'Medium',
+                relatedItemType: 'subscription_plan', relatedItemId: String(p.id),
+                draftNote: `Plan "${p.name}" is recommended but inactive. Either activate it with a valid Stripe Price ID or remove the recommended flag to avoid confusion.`,
+                suggestedLink: '#subscription-plans',
+                canUserPerform: !isReadOnly && (role === 'super_admin' || role === 'finance_admin'),
+              });
+            }
+          }
+
+          // Safety Status → suggest review before reactivation
+          if (allowedScopes.includes('safety') && _kaiSafetyRows.length) {
+            for (const row of (_kaiSafetyRows as any[]).slice(0, 1)) {
+              suggestedActions.push({
+                type: 'user_safety_review',
+                label: 'Review Before Reactivation',
+                reason: `${row.cnt} ${row.user_type}(s) have safety status "${row.status}" — review all related incidents before reactivating.`,
+                riskLevel: 'High',
+                relatedItemType: 'user', relatedItemId: '',
+                draftNote: `Do not reactivate users with "${row.status}" status until all related incidents are resolved and a full safety review is complete.`,
+                suggestedLink: '#caregivers',
+                canUserPerform: !isReadOnly && role === 'super_admin',
+              });
+            }
+          }
+
+          // RBAC: mark canUserPerform=false for read_only_auditor
+          if (isReadOnly) suggestedActions.forEach(a => a.canUserPerform = false);
+
+          return Response.json({ answer, sourceAreasUsed, suggestedLinks, suggestedActions }, { headers });
         } catch(e: any) {
           return Response.json({ error: 'I could not load that admin data right now. Please try again.' }, { status: 500, headers });
         }
