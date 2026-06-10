@@ -7613,6 +7613,17 @@ Return a JSON object with these fields:
                       `- [ID:${c.id}] ${c.name||'Unknown'} | score:${c.score||0} | level:${c.level||'Getting Started'} | id_verified:${c.id_verified?'yes':'no'} | bg_checked:${c.background_checked?'yes':'no'}`
                     ).join('\n'));
                   }
+                  // Proof documents summary (safe - no URLs or content)
+                  try {
+                    const { results: proofDocs } = await env.D1.prepare(
+                      `SELECT status, COUNT(*) as cnt FROM caregiver_documents GROUP BY status`
+                    ).all();
+                    if (proofDocs?.length) {
+                      const docSummary = (proofDocs as any[]).map(d => `${d.status||'unknown'}:${d.cnt}`).join(', ');
+                      contextParts.push(`PROOF DOCUMENTS: ${docSummary}`);
+                      sourceAreasUsed.push('Documents');
+                    }
+                  } catch(_) {}
                 }
               }
             } catch(_) {}
@@ -7640,6 +7651,34 @@ Return a JSON object with these fields:
               const subSummary = (subs as any[]).map(s => `${s.plan}:${s.cnt}`).join(', ') || 'none';
               const cgSubSummary = (cgSubs as any[]).map(s => `${s.plan}:${s.cnt}`).join(', ') || 'none';
               contextParts.push(`SUBSCRIPTIONS — Client active plans: ${subSummary}\nCaregiver active plans: ${cgSubSummary}`);
+
+              // ── Subscription plan health check (from admin-managed plan table) ──
+              try {
+                const { results: plans } = await env.D1.prepare(
+                  `SELECT id, name, slug, audience, price, stripe_price_id, is_active, is_public, is_recommended,
+                          (SELECT COUNT(*) FROM json_each(features) LIMIT 1) as has_features
+                   FROM subscription_plans ORDER BY audience, price`
+                ).all();
+                if (plans?.length) {
+                  sourceAreasUsed.push('Plan Health');
+                  const issues: string[] = [];
+                  for (const p of plans as any[]) {
+                    if (!p.stripe_price_id && p.price > 0) issues.push(`[${p.audience}] "${p.name}" (${p.slug}) — missing Stripe Price ID`);
+                    if (p.is_recommended && !p.is_active) issues.push(`[${p.audience}] "${p.name}" — marked recommended but inactive`);
+                    if (!p.is_public && p.is_active) issues.push(`[${p.audience}] "${p.name}" — active but hidden from public`);
+                    if (p.price === 0 && p.slug !== 'free' && p.slug !== 'free-client' && p.slug !== 'caregiver-free') {
+                      issues.push(`[${p.audience}] "${p.name}" — price is 0 but slug is not a free tier`);
+                    }
+                  }
+                  const totalPlans = plans.length;
+                  const activePlans = (plans as any[]).filter(p => p.is_active && p.is_public).length;
+                  if (issues.length) {
+                    contextParts.push(`SUBSCRIPTION PLAN HEALTH (${totalPlans} plans, ${activePlans} active+public):\nISSUES FOUND:\n` + issues.map(i => `- ${i}`).join('\n'));
+                  } else {
+                    contextParts.push(`SUBSCRIPTION PLAN HEALTH: ${totalPlans} plans, ${activePlans} active+public. No issues detected.`);
+                  }
+                }
+              } catch(_) {}
             } catch(_) {}
           }
 
@@ -7666,6 +7705,11 @@ You MUST NOT reveal: SSNs, ITINs, DOB, exact addresses, background report detail
 You MUST NOT invent or guess data. If unavailable: say "I do not have that data available yet."
 If results are empty: say "No matching items found."
 Be concise, professional, and action-oriented. Use bullet points for lists.
+When asked "What should I review next?" rank by: (1) emergency/high urgency incidents, (2) safety status under_review, (3) Trust Passport proof submissions needing review, (4) Critical/High Product Logs not yet closed, (5) subscription plan issues, (6) other QA items.
+When asked about subscription plan issues, check SUBSCRIPTION PLAN HEALTH data and report any issues found.
+When asked about launch blockers, focus on Critical/High Product Logs that are Bug, Known Issue, or Security type.
+When asked about caregivers needing review, highlight those with id_verified:no or bg_checked:no.
+When summarizing, always end with a concise "Recommended Next Action" line.
 
 Admin role: ${role}
 Admin email: ${sess.email}
