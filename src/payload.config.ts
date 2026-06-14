@@ -1,4 +1,12 @@
 // @ts-nocheck
+// ─────────────────────────────────────────────────────────────────────────────
+// Carehia Launch Policy — Caregiver Free First Year
+// Set CAREGIVER_FREE_LAUNCH_ACCESS = false to re-enable caregiver subscription
+// requirements after the free first-year launch period ends.
+// Client subscriptions and safety restrictions are never bypassed.
+// ─────────────────────────────────────────────────────────────────────────────
+const CAREGIVER_FREE_LAUNCH_ACCESS = true
+
 import { buildConfig } from 'payload'
 import { sqliteD1Adapter } from '@payloadcms/db-d1-sqlite'
 import path from 'path'
@@ -2779,27 +2787,30 @@ Return a JSON object with these fields:
           await _ensureCaregiverRequestHideColumns(cloudflare.env.D1)
           // Fetch bookings, JOIN client_accounts for real contact info when unlocked
           const result = await cloudflare.env.D1.prepare(
-            `SELECT cb.*,
-              CASE WHEN cb.is_unlocked = 1 THEN ca.name ELSE NULL END as client_name
+            `SELECT cb.*, ca.name as client_name
              FROM caregiver_bookings cb
              LEFT JOIN client_accounts ca ON ca.email = cb.client_email
              WHERE cb.caregiver_id = ? AND COALESCE(cb.caregiver_hidden, 0) = 0
              ORDER BY cb.created_at DESC LIMIT 50`
           ).bind(String(caregiverId)).all()
-          const bookings = (result.results || []).map((b: any) => ({
-            id: b.id,
-            clientEmail: b.is_unlocked ? b.client_email : (b.client_email ? b.client_email.substring(0, 2) + '***@***' : ''),
-            clientName: b.is_unlocked ? (b.client_name || null) : null,
-            clientPhone: b.is_unlocked ? (b.client_phone || null) : null,
-            careNeeds: b.care_needs,
-            preferredDate: b.is_unlocked ? b.preferred_date : null,
-            preferredTime: b.is_unlocked ? b.preferred_time : null,
-            interviewType: b.interview_type,
-            notes: b.is_unlocked ? b.notes : '',
-            status: b.status,
-            isUnlocked: b.is_unlocked === 1,
-            createdAt: b.created_at,
-          }))
+          const bookings = (result.results || []).map((b: any) => {
+            // During caregiver free launch year, treat all bookings as unlocked
+            const accessGranted = CAREGIVER_FREE_LAUNCH_ACCESS || b.is_unlocked === 1
+            return {
+              id: b.id,
+              clientEmail: accessGranted ? b.client_email : (b.client_email ? b.client_email.substring(0, 2) + '***@***' : ''),
+              clientName: accessGranted ? (b.client_name || null) : null,
+              clientPhone: accessGranted ? (b.client_phone || null) : null,
+              careNeeds: b.care_needs,
+              preferredDate: accessGranted ? b.preferred_date : null,
+              preferredTime: accessGranted ? b.preferred_time : null,
+              interviewType: b.interview_type,
+              notes: accessGranted ? b.notes : '',
+              status: b.status,
+              isUnlocked: accessGranted,
+              createdAt: b.created_at,
+            }
+          })
           return Response.json({ success: true, bookings })
         } catch (error) {
           return Response.json({ error: String(error) }, { status: 500 })
